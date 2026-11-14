@@ -10,6 +10,7 @@ import {
   DevboxError,
   type DevboxClientPairing,
   type DevboxCreateInput,
+  type DevboxPendingLogin,
   type DevboxCredentialState,
   type DevboxState,
   type DevboxSummary,
@@ -84,6 +85,7 @@ export class DevboxService extends Context.Service<
   DevboxService,
   {
     readonly list: Effect.Effect<ReadonlyArray<DevboxSummary>, DevboxError>;
+    readonly pendingLogins: Effect.Effect<ReadonlyArray<DevboxPendingLogin>>;
     /** Starts creating a box and returns at once; it shows as `creating` until linked. */
     readonly create: (input: DevboxCreateInput) => Effect.Effect<DevboxSummary, DevboxError>;
     /** Waits until the box is linked or failed, at most `timeout`. */
@@ -751,6 +753,7 @@ const make = Effect.gen(function* () {
 
   return DevboxService.of({
     list,
+    pendingLogins: pool.pendingLogins,
     create,
     awaitReady,
     wake,

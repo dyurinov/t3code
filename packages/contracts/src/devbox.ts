@@ -83,7 +83,18 @@ export const DevboxDeleteInput = Schema.Struct({
 });
 export type DevboxDeleteInput = typeof DevboxDeleteInput.Type;
 
-export const DevboxListResult = Schema.Struct({ devboxes: Schema.Array(DevboxSummary) });
+export const DevboxPendingLogin = Schema.Struct({
+  provider: Schema.Literals(["claude", "codex"]),
+  /** Where the user approves the sign-in. */
+  url: Schema.String,
+});
+export type DevboxPendingLogin = typeof DevboxPendingLogin.Type;
+
+export const DevboxListResult = Schema.Struct({
+  devboxes: Schema.Array(DevboxSummary),
+  /** Sign-ins for new devboxes that wait for the user's approval. */
+  pendingLogins: Schema.Array(DevboxPendingLogin),
+});
 export type DevboxListResult = typeof DevboxListResult.Type;
 
 export const DevboxDeleteResult = Schema.Struct({ name: Schema.String, deleted: Schema.Boolean });

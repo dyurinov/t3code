@@ -1,5 +1,5 @@
 import { createDevboxEnvironmentAtoms } from "@t3tools/client-runtime/state/devboxes";
-import type { DevboxSummary, EnvironmentId } from "@t3tools/contracts";
+import type { DevboxPendingLogin, DevboxSummary, EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -14,6 +14,7 @@ export function useDevboxes(): {
   /** Whether the host can manage devboxes: its list answered, which needs the Coder CLI. */
   readonly available: boolean;
   readonly devboxes: ReadonlyArray<DevboxSummary>;
+  readonly pendingLogins: ReadonlyArray<DevboxPendingLogin>;
   readonly refresh: () => void;
 } {
   const hostEnvironmentId = usePrimaryEnvironmentId();
@@ -26,6 +27,7 @@ export function useDevboxes(): {
     hostEnvironmentId,
     available: query.data !== null,
     devboxes: query.data?.devboxes ?? [],
+    pendingLogins: query.data?.pendingLogins ?? [],
     refresh: query.refresh,
   };
 }

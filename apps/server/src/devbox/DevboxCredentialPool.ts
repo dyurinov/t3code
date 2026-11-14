@@ -58,6 +58,10 @@ export class DevboxCredentialPool extends Context.Service<
     readonly mint: (
       provider: DevboxCredentialProvider,
     ) => Effect.Effect<string, DevboxCredentialError>;
+    /** Sign-ins waiting for the user to approve them in a browser, with their links. */
+    readonly pendingLogins: Effect.Effect<
+      ReadonlyArray<{ readonly provider: DevboxCredentialProvider; readonly url: string }>
+    >;
   }
 >()("t3/devbox/DevboxCredentialPool") {}
 
@@ -80,12 +84,41 @@ const make = Effect.gen(function* () {
   const root = yield* Config.String("T3CODE_DEVBOX_CREDS_DIR").pipe(
     Config.withDefault(path.join(NodeOS.homedir(), ".config", "devbox-creds")),
   );
-  const claudeBin = yield* Config.String("T3CODE_DEVBOX_CLAUDE_BIN").pipe(
-    Config.withDefault("claude"),
-  );
-  const codexBin = yield* Config.String("T3CODE_DEVBOX_CODEX_BIN").pipe(
-    Config.withDefault("codex"),
-  );
+  const configuredBins = {
+    claude: yield* Config.String("T3CODE_DEVBOX_CLAUDE_BIN").pipe(Config.option),
+    codex: yield* Config.String("T3CODE_DEVBOX_CODEX_BIN").pipe(Config.option),
+  };
+  const searchPath = yield* Config.String("PATH").pipe(Config.withDefault(""));
+  // The login link a running sign-in printed, until it finishes.
+  const pending = new Map<DevboxCredentialProvider, string>();
+
+  /**
+   * The provider's own CLI. Asana's checkout puts `claude` and `codex` wrappers first on PATH
+   * (and mise shims fall through to them); they need a terminal's environment, so skip them.
+   */
+  const resolveCli = Effect.fn("DevboxCredentialPool.resolveCli")(function* (
+    name: DevboxCredentialProvider,
+  ) {
+    const nodeInstalls = path.join(NodeOS.homedir(), ".local", "share", "mise", "installs", "node");
+    const nodeVersions = yield* fs.readDirectory(nodeInstalls).pipe(Effect.orElseSucceed(() => []));
+    const candidates = [
+      ...Option.toArray(configuredBins[name]),
+      ...searchPath
+        .split(":")
+        .filter(
+          (dir) => dir.length > 0 && !dir.includes("sandbox/asana") && !dir.includes("mise/shims"),
+        )
+        .map((dir) => path.join(dir, name)),
+      ...nodeVersions
+        .toSorted((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+        .map((version) => path.join(nodeInstalls, version, "bin", name)),
+      path.join(NodeOS.homedir(), ".local", name, name),
+    ];
+    for (const candidate of candidates) {
+      if (yield* fs.exists(candidate).pipe(Effect.orElseSucceed(() => false))) return candidate;
+    }
+    return name;
+  });
 
   const claudeKeychainService = (configDir: string) =>
     digest.digest(Digest.sha256, new TextEncoder().encode(configDir)).pipe(
@@ -227,13 +260,12 @@ const make = Effect.gen(function* () {
       yield* fs
         .makeDirectory(sessionDir, { mode: 0o700 })
         .pipe(Effect.mapError(fail(`Could not create ${sessionDir}`)));
+      const cli = yield* resolveCli(provider);
       const login =
         provider === "claude"
-          ? {
-              args: [claudeBin, "auth", "login", "--claudeai"],
-              env: { CLAUDE_CONFIG_DIR: sessionDir },
-            }
-          : { args: [codexBin, "login"], env: { CODEX_HOME: sessionDir } };
+          ? { args: [cli, "auth", "login", "--claudeai"], env: { CLAUDE_CONFIG_DIR: sessionDir } }
+          : { args: [cli, "login"], env: { CODEX_HOME: sessionDir } };
+      let output = "";
       const discard = fs.remove(sessionDir, { recursive: true, force: true }).pipe(Effect.ignore);
       const result = yield* runner
         .run({
@@ -243,10 +275,20 @@ const make = Effect.gen(function* () {
           env: login.env,
           // Claude approves a signed-in browser at once; Codex may wait for one click.
           timeout: "10 minutes",
+          onStdoutChunk: (chunk) => {
+            if (pending.has(provider)) return;
+            output += new TextDecoder().decode(chunk);
+            const url =
+              /https:\/\/[^\s\u0007\u001b"']*(?:authorize|oauth)[^\s\u0007\u001b"']*/u.exec(
+                output,
+              )?.[0];
+            if (url) pending.set(provider, url);
+          },
         })
         .pipe(
           Effect.mapError(fail(`The ${provider} login did not finish`)),
           Effect.onError(() => discard),
+          Effect.ensuring(Effect.sync(() => pending.delete(provider))),
         );
       const signedIn =
         provider === "claude"
@@ -264,7 +306,11 @@ const make = Effect.gen(function* () {
     },
   );
 
-  return DevboxCredentialPool.of({ claim, release, freeCount, mint });
+  const pendingLogins: DevboxCredentialPool["Service"]["pendingLogins"] = Effect.sync(() =>
+    [...pending].map(([provider, url]) => ({ provider, url })),
+  );
+
+  return DevboxCredentialPool.of({ claim, release, freeCount, mint, pendingLogins });
 });
 
 export const layer = Layer.effect(DevboxCredentialPool, make);

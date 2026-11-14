@@ -8,7 +8,8 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { WifiOffIcon } from "lucide-react";
+import { KeyRoundIcon, WifiOffIcon } from "lucide-react";
+import { readLocalApi } from "../../localApi";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { environmentCatalog } from "../../connection/catalog";
 import { ConnectionDiagnosisHeadline } from "../settings/ConnectionDiagnosisDetails";
@@ -72,7 +73,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
-  const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
+  const { hostEnvironmentId: devboxHostId, devboxes, pendingLogins } = useDevboxes();
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const [wakingDevbox, setWakingDevbox] = useState(false);
   const unavailableDevbox = devboxForEnvironment(
@@ -266,6 +267,22 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
             ) : null}
             {disconnectAction}
           </>
+        ),
+      });
+    }
+    for (const login of pendingLogins) {
+      const providerName = login.provider === "codex" ? "Codex" : "Claude";
+      items.push({
+        id: `devbox-login:${login.provider}`,
+        variant: "warning",
+        group: "environment",
+        icon: <KeyRoundIcon />,
+        title: `${providerName} needs one sign-in for your devboxes`,
+        description: `Approve it in the browser so new devboxes come signed in to ${providerName}.`,
+        actions: (
+          <Button size="xs" onClick={() => void readLocalApi()?.shell.openExternal(login.url)}>
+            Approve
+          </Button>
         ),
       });
     }

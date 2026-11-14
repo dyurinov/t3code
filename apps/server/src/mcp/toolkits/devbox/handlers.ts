@@ -22,7 +22,11 @@ const withService = <A>(
 // Boxes cost money and hold credentials, so changing them is an environment setting.
 export const layer = McpToolAccess.toLayer(DevboxToolkit, {
   devbox_list: McpToolAccess.reads(() =>
-    withService((service) => service.list).pipe(Effect.map((devboxes) => ({ devboxes }))),
+    withService((service) =>
+      Effect.all([service.list, service.pendingLogins]).pipe(
+        Effect.map(([devboxes, pendingLogins]) => ({ devboxes, pendingLogins })),
+      ),
+    ),
   ),
   devbox_create: McpToolAccess.writesEnvironment((input) =>
     withService((service) => service.create(input)),

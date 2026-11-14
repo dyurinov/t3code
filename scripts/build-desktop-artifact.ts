@@ -2852,8 +2852,6 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           T3CODE_DEVBOX_SPARES: "1",
           // The codex on PATH is Asana's z wrapper, which needs a terminal's environment.
           T3CODE_DEVBOX_CODEX_BIN: `${NodeOS.homedir()}/.local/codex/codex`,
-          // The claude on PATH can be the same wrapper; mise's shim is the real CLI.
-          T3CODE_DEVBOX_CLAUDE_BIN: `${NodeOS.homedir()}/.local/share/mise/shims/claude`,
         },
         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
