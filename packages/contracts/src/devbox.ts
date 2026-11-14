@@ -100,7 +100,16 @@ export const DevboxListResult = Schema.Struct({
   devboxes: Schema.Array(DevboxSummary),
   /** Sign-ins for new devboxes that wait for the user's approval. */
   pendingLogins: Schema.Array(DevboxPendingLogin),
+  /** Providers a devbox has no sign-in for; `devboxes.startLogin` starts one. */
+  missingLogins: Schema.Array(Schema.Literals(["claude", "codex"])),
 });
+
+export const DevboxStartLoginInput = Schema.Struct({
+  provider: Schema.Literals(["claude", "codex"]),
+});
+export type DevboxStartLoginInput = typeof DevboxStartLoginInput.Type;
+export const DevboxStartLoginResult = Schema.Struct({ url: Schema.String });
+export type DevboxStartLoginResult = typeof DevboxStartLoginResult.Type;
 export type DevboxListResult = typeof DevboxListResult.Type;
 
 export const DevboxDeleteResult = Schema.Struct({ name: Schema.String, deleted: Schema.Boolean });

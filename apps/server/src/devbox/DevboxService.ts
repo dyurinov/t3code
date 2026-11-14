@@ -48,6 +48,7 @@ import {
   ACTIVE_RUN_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
   PAIR_SCRIPT,
+  PROVISION_REVISION,
   PROVISION_SCRIPT,
   REMOTE_T3_PORT,
   parseCoderList,
@@ -71,6 +72,8 @@ const DevboxRecord = Schema.Struct({
   }),
   /** Prepared ahead of time, waiting for `claim`. */
   spare: Schema.optionalKey(Schema.Boolean),
+  /** Which provisioning script last set the box up; a newer one runs again on connect. */
+  provisioned: Schema.optionalKey(Schema.String),
 });
 type DevboxRecord = typeof DevboxRecord.Type;
 const DevboxFile = Schema.Struct({ devboxes: Schema.Array(DevboxRecord) });
@@ -93,6 +96,10 @@ export class DevboxService extends Context.Service<
   {
     readonly list: Effect.Effect<ReadonlyArray<DevboxSummary>, DevboxError>;
     readonly pendingLogins: Effect.Effect<ReadonlyArray<DevboxPendingLogin>>;
+    /** Starts one sign-in for `provider` (unless one waits) and returns where to approve it. */
+    readonly startLogin: (provider: "claude" | "codex") => Effect.Effect<string, DevboxError>;
+    /** Providers some devbox has no sign-in for while the pool holds none to give it. */
+    readonly missingLogins: Effect.Effect<ReadonlyArray<"claude" | "codex">>;
     readonly submitLoginCode: (
       provider: "claude" | "codex",
       code: string,
@@ -468,6 +475,14 @@ const make = Effect.gen(function* () {
     yield* coder(["ssh", "--wait=yes", stored.name, "--", "true"], "15 minutes");
     // A box whose creation stopped early, or that met an empty pool, still needs its logins.
     const record = yield* installCredentials(stored);
+    // A box set up by this script starts T3 itself at boot: reconnecting is enough.
+    if (record.provisioned === PROVISION_REVISION && record.environmentId !== null) {
+      const reached = yield* startTunnel(record).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      );
+      if (reached) return yield* link(record);
+    }
     const version = yield* t3Version;
     yield* ssh(
       record.name,
@@ -475,8 +490,10 @@ const make = Effect.gen(function* () {
       PROVISION_SCRIPT,
       "15 minutes",
     );
-    yield* startTunnel(record);
-    return yield* link(record);
+    const provisioned = { ...record, provisioned: PROVISION_REVISION };
+    yield* putRecord(provisioned);
+    yield* startTunnel(provisioned);
+    return yield* link(provisioned);
   });
 
   const provision = Effect.fn("DevboxService.provision")(function* (
@@ -623,13 +640,26 @@ const make = Effect.gen(function* () {
     return yield* summaryOf(name);
   });
 
+  // Stopping takes about a minute; callers follow the box's state instead of waiting.
   const stop: DevboxService["Service"]["stop"] = Effect.fn("DevboxService.stop")(function* (name) {
     yield* getRecord(name);
-    yield* locks.withLock(
+    yield* setTransient(name, { state: "stopping", lastError: null });
+    yield* FiberMap.run(
+      creations,
       name,
-      FiberMap.remove(tunnels, name).pipe(
-        Effect.andThen(coder(["stop", name, "--yes"], "10 minutes")),
-      ),
+      locks
+        .withLock(
+          name,
+          FiberMap.remove(tunnels, name).pipe(
+            Effect.andThen(coder(["stop", name, "--yes"], "10 minutes")),
+          ),
+        )
+        .pipe(
+          Effect.andThen(setTransient(name, undefined)),
+          Effect.catchCause((cause) =>
+            setTransient(name, { state: "failed", lastError: errorText(cause) }),
+          ),
+        ),
     );
     return yield* summaryOf(name);
   });
@@ -726,6 +756,67 @@ const make = Effect.gen(function* () {
     return { ...pairing, name };
   }).pipe(Effect.withSpan("DevboxService.claim"));
 
+  // Hands pooled sign-ins to running boxes without them, spares first. Sign-ins are minted only
+  // when the user asks (`startLogin`), so no browser window opens on its own.
+  const distributeLogins = Effect.gen(function* () {
+    const all = yield* workspaces;
+    // Spares first: they are the boxes someone takes next.
+    const ordered = [...(yield* Ref.get(records)).values()].toSorted(
+      (a, b) => Number(b.spare === true) - Number(a.spare === true),
+    );
+    for (const record of ordered) {
+      const missing =
+        record.credentials.claude !== "installed" || record.credentials.codex !== "installed";
+      if (!missing || all.get(record.name)?.latest_build.status !== "running") continue;
+      yield* locks
+        .withLock(record.name, installCredentials(record))
+        .pipe(Effect.catchCause((cause) => Effect.logWarning("devbox logins failed", { cause })));
+    }
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("devbox logins could not be handed out", { cause }),
+    ),
+  );
+  const pendingUrl = (provider: "claude" | "codex") =>
+    pool.pendingLogins.pipe(
+      Effect.map((logins) => logins.find((login) => login.provider === provider)?.url),
+    );
+  const startLogin: DevboxService["Service"]["startLogin"] = Effect.fn("DevboxService.startLogin")(
+    function* (provider) {
+      const waiting = yield* pendingUrl(provider);
+      if (waiting !== undefined) return waiting;
+      yield* FiberSet.run(
+        background,
+        pool.mint(provider).pipe(Effect.andThen(distributeLogins), Effect.ignore),
+      );
+      // The CLI prints its approval link within a few seconds of starting.
+      const url = yield* pendingUrl(provider).pipe(
+        Effect.repeat({
+          schedule: Schedule.spaced("500 millis"),
+          until: (found) => found !== undefined,
+        }),
+        Effect.timeoutOption("20 seconds"),
+        Effect.map(Option.flatMap(Option.fromUndefinedOr)),
+      );
+      if (Option.isNone(url))
+        return yield* new DevboxError({
+          reason: "provision",
+          message: `The ${provider} sign-in did not start.`,
+        });
+      return url.value;
+    },
+  );
+  const missingLogins: DevboxService["Service"]["missingLogins"] = Effect.gen(function* () {
+    const current = [...(yield* Ref.get(records)).values()];
+    const missing: Array<"claude" | "codex"> = [];
+    for (const provider of ["claude", "codex"] as const) {
+      if (!current.some((record) => record.credentials[provider] !== "installed")) continue;
+      const free = yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 0));
+      if (free === 0) missing.push(provider);
+    }
+    return missing;
+  });
+
   const submitLoginCode: DevboxService["Service"]["submitLoginCode"] = Effect.fn(
     "DevboxService.submitLoginCode",
   )(function* (provider, code) {
@@ -787,40 +878,7 @@ const make = Effect.gen(function* () {
     Effect.catchCause((cause) => Effect.logWarning("devbox keep-awake failed", { cause })),
     Effect.repeat(Schedule.spaced(KEEP_ALIVE_INTERVAL)),
   );
-  // Keeps one sign-in of each provider waiting, and hands new ones to boxes that went without.
-  const topUpLogins = Effect.gen(function* () {
-    for (const provider of ["claude", "codex"] as const) {
-      const free = yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 1));
-      if (free === 0)
-        yield* pool.mint(provider).pipe(
-          Effect.tapError((error) =>
-            Effect.logWarning("devbox login could not be minted", {
-              provider,
-              error: error.message,
-            }),
-          ),
-          Effect.ignore,
-        );
-    }
-    const all = yield* workspaces;
-    // Spares first: they are the boxes someone takes next.
-    const ordered = [...(yield* Ref.get(records)).values()].toSorted(
-      (a, b) => Number(b.spare === true) - Number(a.spare === true),
-    );
-    for (const record of ordered) {
-      const missing =
-        record.credentials.claude !== "installed" || record.credentials.codex !== "installed";
-      if (!missing || all.get(record.name)?.latest_build.status !== "running") continue;
-      yield* locks
-        .withLock(record.name, installCredentials(record))
-        .pipe(Effect.catchCause((cause) => Effect.logWarning("devbox logins failed", { cause })));
-    }
-  }).pipe(
-    Effect.catchCause((cause) => Effect.logWarning("devbox login top-up failed", { cause })),
-    Effect.repeat(Schedule.spaced(Duration.minutes(5))),
-  );
-  // Minting opens browser tabs, so only the app that keeps spares does it.
-  if (spareCount > 0) yield* forkParked(topUpLogins);
+  yield* forkParked(distributeLogins.pipe(Effect.repeat(Schedule.spaced(Duration.minutes(5)))));
   yield* forkParked(
     reconnect.pipe(
       Effect.catchCause((cause) => Effect.logWarning("devbox reconnect failed", { cause })),
@@ -832,6 +890,8 @@ const make = Effect.gen(function* () {
   return DevboxService.of({
     list,
     pendingLogins: pool.pendingLogins,
+    startLogin,
+    missingLogins,
     submitLoginCode,
     create,
     awaitReady,

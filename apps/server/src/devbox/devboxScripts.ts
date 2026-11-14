@@ -107,7 +107,8 @@ After=network-online.target
 
 [Service]
 Environment=T3CODE_NO_BROWSER=1
-ExecStart=/bin/bash -lc 'exec "$dir/t3" serve --host 127.0.0.1 --port ${REMOTE_T3_PORT} --base-dir "\$HOME/.t3"'
+# Interactive (-i): Asana's claude and codex wrappers call z, which only interactive shells define.
+ExecStart=/bin/bash -lic 'exec "$dir/t3" serve --host 127.0.0.1 --port ${REMOTE_T3_PORT} --base-dir "\$HOME/.t3"'
 Restart=always
 RestartSec=3
 
@@ -313,3 +314,13 @@ for url in "$@"; do
   esac
 done
 `;
+
+/** Changes whenever PROVISION_SCRIPT does, so boxes set up by an older one are set up again. */
+export const PROVISION_REVISION = (() => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < PROVISION_SCRIPT.length; index++) {
+    hash ^= PROVISION_SCRIPT.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16);
+})();

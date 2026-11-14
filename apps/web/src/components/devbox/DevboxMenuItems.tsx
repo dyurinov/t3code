@@ -1,8 +1,11 @@
+import { RegistryContext } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { useContext } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
 import { ensureLocalApi } from "../../localApi";
 import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
+import { peerLinkEnvironment } from "../../state/peerLinks";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { MenuItem, MenuSeparator } from "../ui/menu";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -15,6 +18,7 @@ export function DevboxMenuItems({ environmentId }: { readonly environmentId: Env
   const wake = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const remove = useAtomCommand(devboxEnvironment.remove, { reportFailure: false });
   const forget = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
+  const registry = useContext(RegistryContext);
   if (devbox === null || hostEnvironmentId === null) return null;
 
   const report = (title: string) => (result: { readonly _tag: string }) => {
@@ -34,6 +38,7 @@ export function DevboxMenuItems({ environmentId }: { readonly environmentId: Env
     });
     if (deleted._tag === "Failure") return report(`Could not delete ${devbox.name}`)(deleted);
     await forget(environmentId);
+    registry.refresh(peerLinkEnvironment.list({ environmentId: hostEnvironmentId, input: {} }));
     toastManager.add(stackedThreadToast({ type: "success", title: `Deleted ${devbox.name}` }));
   };
 

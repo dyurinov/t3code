@@ -80,6 +80,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     available: devboxesAvailable,
     devboxes,
     pendingLogins,
+    logins: devboxLogins,
     refresh: refreshDevboxes,
   } = useDevboxes();
   // Sign-ins and box states change on the host with nothing pushed; poll faster while one waits.
@@ -276,7 +277,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
                   : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
         description:
           devboxPhase === "starting" ? (
-            "About 2 minutes. Your draft stays here."
+            "This takes a few minutes. Your draft stays here."
           ) : devboxPhase === "failed" ? (
             (unavailableDevbox?.lastError ?? "Starting it failed.")
           ) : devboxPhase === "sleeping" ? (
@@ -298,7 +299,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
                 {devboxPhase === "failed" ? "Try again" : "Wake devbox"}
               </Button>
             ) : null}
-            {unavailableConnection.phase !== "connecting" ? (
+            {devboxPhase === null && unavailableConnection.phase !== "connecting" ? (
               <Button
                 size="xs"
                 variant="ghost"
@@ -311,13 +312,13 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
                 {environmentReconnecting ? "Retry now" : "Reconnect"}
               </Button>
             ) : null}
-            {disconnectAction}
+            {devboxPhase === null ? disconnectAction : null}
           </>
         ),
       });
     }
     // Shown where a devbox gets picked, not over every running conversation.
-    for (const login of input.isDraft ? pendingLogins : []) {
+    for (const login of input.isDraft ? devboxLogins : []) {
       const providerName = login.provider === "codex" ? "Codex" : "Claude";
       items.push({
         id: `devbox-login:${login.provider}`,

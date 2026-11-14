@@ -86,6 +86,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.devboxesPairClient]: AuthAccessWriteScope,
   [WS_METHODS.devboxesClaim]: AuthAccessWriteScope,
   [WS_METHODS.devboxesSubmitLoginCode]: AuthAccessWriteScope,
+  [WS_METHODS.devboxesStartLogin]: AuthAccessWriteScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

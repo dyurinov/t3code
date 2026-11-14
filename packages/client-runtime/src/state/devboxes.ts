@@ -52,6 +52,12 @@ export function createDevboxEnvironmentAtoms<R, E>(
       onSuccess: ({ environmentId }, registry) =>
         Effect.sync(() => registry.refresh(list({ environmentId, input: {} }))),
     }),
+    startLogin: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:devboxes:start-login",
+      tag: WS_METHODS.devboxesStartLogin,
+      onSuccess: ({ environmentId }, registry) =>
+        Effect.sync(() => registry.refresh(list({ environmentId, input: {} }))),
+    }),
     submitLoginCode: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:devboxes:submit-login-code",
       tag: WS_METHODS.devboxesSubmitLoginCode,

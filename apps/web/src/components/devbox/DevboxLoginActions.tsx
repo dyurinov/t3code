@@ -1,39 +1,56 @@
-import type { DevboxPendingLogin, EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { useState } from "react";
 
 import { readLocalApi } from "../../localApi";
-import { devboxEnvironment } from "../../state/devboxes";
+import { type DevboxLogin, devboxEnvironment } from "../../state/devboxes";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /**
- * Approve opens the provider's sign-in page. Claude's page then shows a code, which goes
+ * Approve starts a sign-in when none waits, then opens the provider's page. Claude's page then shows a code, which goes
  * back to the waiting sign-in from here; Codex finishes in the browser by itself.
  */
 export function DevboxLoginActions({
   login,
   hostEnvironmentId,
 }: {
-  readonly login: DevboxPendingLogin;
+  readonly login: DevboxLogin;
   readonly hostEnvironmentId: EnvironmentId;
 }) {
   const submit = useAtomCommand(devboxEnvironment.submitLoginCode, { reportFailure: false });
+  const start = useAtomCommand(devboxEnvironment.startLogin, { reportFailure: false });
   const [opened, setOpened] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [code, setCode] = useState("");
   const [sending, setSending] = useState(false);
 
+  const approve = async () => {
+    let url = login.url;
+    if (url === null) {
+      setStarting(true);
+      const result = await start({
+        environmentId: hostEnvironmentId,
+        input: { provider: login.provider },
+      });
+      setStarting(false);
+      if (result._tag === "Failure") {
+        toastManager.add(
+          stackedThreadToast({ type: "error", title: "The sign-in could not start" }),
+        );
+        return;
+      }
+      url = result.value.url;
+    }
+    setOpened(true);
+    void readLocalApi()?.shell.openExternal(url);
+  };
+
   if (!opened || login.provider === "codex") {
     return (
-      <Button
-        size="xs"
-        onClick={() => {
-          setOpened(true);
-          void readLocalApi()?.shell.openExternal(login.url);
-        }}
-      >
-        Approve
+      <Button size="xs" disabled={starting} onClick={() => void approve()}>
+        {starting ? "Starting sign-in…" : "Approve"}
       </Button>
     );
   }
