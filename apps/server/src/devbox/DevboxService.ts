@@ -668,6 +668,8 @@ const make = Effect.gen(function* () {
     yield* FiberSet.run(background, ensureSpares);
     const settled = yield* awaitReady(name, CREATE_TIMEOUT);
     if (settled.state !== "running" || settled.environmentId === null) yield* wake(name);
+    // After a restart the forward to a running box may not be up yet; the client needs it now.
+    else yield* startTunnel(yield* getRecord(name));
     const pairing = yield* pairClient(name);
     return { ...pairing, name };
   }).pipe(Effect.withSpan("DevboxService.claim"));
@@ -690,7 +692,11 @@ const make = Effect.gen(function* () {
   yield* Ref.set(records, yield* load);
   const reconnect = Effect.gen(function* () {
     const all = yield* workspaces;
-    for (const record of (yield* Ref.get(records)).values()) {
+    const ordered = [...(yield* Ref.get(records)).values()].toSorted(
+      (a, b) => Number(b.spare === true) - Number(a.spare === true),
+    );
+    const live: Array<DevboxRecord> = [];
+    for (const record of ordered) {
       // A spare whose creation stopped before Coder made it would block every new spare.
       if (record.spare === true && record.environmentId === null && !all.has(record.name)) {
         yield* Ref.update(records, (current) => {
@@ -701,15 +707,21 @@ const make = Effect.gen(function* () {
         yield* save().pipe(Effect.ignore);
         continue;
       }
-      if (all.get(record.name)?.latest_build.status !== "running") continue;
-      yield* locks
-        .withLock(record.name, connect(record))
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("devbox reconnect failed", { name: record.name, cause }),
-          ),
-        );
+      if (all.get(record.name)?.latest_build.status === "running") live.push(record);
     }
+    // Spares first, all at once: a restart should not keep the next box offline for minutes.
+    yield* Effect.forEach(
+      live,
+      (record) =>
+        locks
+          .withLock(record.name, connect(record))
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("devbox reconnect failed", { name: record.name, cause }),
+            ),
+          ),
+      { concurrency: 4, discard: true },
+    );
   });
   const keepAwake = Effect.gen(function* () {
     const all = yield* workspaces;

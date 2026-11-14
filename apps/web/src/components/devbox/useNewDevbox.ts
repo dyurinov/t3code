@@ -14,6 +14,7 @@ export function useNewDevbox() {
   const { hostEnvironmentId, available } = useDevboxes();
   const claim = useAtomCommand(devboxEnvironment.claim, { reportFailure: false });
   const connect = useAtomCommand(connectPairing, { reportFailure: false });
+  const pairClient = useAtomCommand(devboxEnvironment.pairClient, { reportFailure: false });
   const [state, setState] = useAtom(devboxClaimAtom);
 
   const fail = (title: string) => {
@@ -26,11 +27,27 @@ export function useNewDevbox() {
     setState({ kind: "preparing", queuedSend: false });
     const claimed = await claim({ environmentId: hostEnvironmentId, input: {} });
     if (claimed._tag === "Failure") return fail("Could not prepare a devbox");
-    const connected = await connect({
-      host: claimed.value.url,
-      pairingCode: claimed.value.pairingCode,
-      expectedEnvironmentId: claimed.value.environmentId,
+    // The pairing code works once, so retry with a fresh one if the first try finds no answer.
+    let pairing = claimed.value;
+    let connected = await connect({
+      host: pairing.url,
+      pairingCode: pairing.pairingCode,
+      expectedEnvironmentId: pairing.environmentId,
     });
+    for (let attempt = 1; connected._tag === "Failure" && attempt < 4; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      const fresh = await pairClient({
+        environmentId: hostEnvironmentId,
+        input: { name: claimed.value.name },
+      });
+      if (fresh._tag === "Failure") continue;
+      pairing = { ...fresh.value, name: claimed.value.name };
+      connected = await connect({
+        host: pairing.url,
+        pairingCode: pairing.pairingCode,
+        expectedEnvironmentId: pairing.environmentId,
+      });
+    }
     if (connected._tag === "Failure")
       return fail(`${claimed.value.name} is ready, but connecting to it failed`);
     setState((current) => ({
