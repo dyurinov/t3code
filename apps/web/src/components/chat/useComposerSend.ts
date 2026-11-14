@@ -59,6 +59,7 @@ import {
 import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { isProviderInstancePickerReady } from "../../providerInstances";
 import { useAtom } from "@effect/atom-react";
 import { environmentCatalog } from "../../connection/catalog";
 import {
@@ -1538,20 +1539,39 @@ export function useComposerSend(input: ComposerSendInput) {
     });
     if (ready) return onSendLatest(...args);
   };
-  // A send pressed while a devbox was being taken goes out once the draft is on it.
-  const finishDevboxClaim = useEffectEvent((kind: string, current: EnvironmentId) => {
-    if (kind !== "switched" || devboxClaim.kind !== "switched") return;
-    if (devboxClaim.environmentId !== current) return;
+  // A send pressed while a devbox was being taken goes out once the draft is on it and one of
+  // its providers is ready; a box's provider status arrives a moment after it connects.
+  const devboxProviderReady = providerInstanceEntries.some(isProviderInstancePickerReady);
+  const finishDevboxClaim = useEffectEvent(
+    (kind: string, current: EnvironmentId, ready: boolean) => {
+      if (kind !== "switched" || devboxClaim.kind !== "switched") return;
+      if (devboxClaim.environmentId !== current) return;
+      if (devboxClaim.queuedSend && !ready) return;
+      setDevboxClaim({ kind: "idle" });
+      toastManager.add(
+        stackedThreadToast({ type: "success", title: `Running on ${devboxClaim.name}` }),
+      );
+      if (devboxClaim.queuedSend) void onSendWithRouting();
+    },
+  );
+  const abandonQueuedDevboxSend = useEffectEvent(() => {
+    if (devboxClaim.kind !== "switched") return;
     setDevboxClaim({ kind: "idle" });
     toastManager.add(
-      stackedThreadToast({ type: "success", title: `Running on ${devboxClaim.name}` }),
+      stackedThreadToast({
+        type: "warning",
+        title: `${devboxClaim.name} has no provider ready`,
+        description: "Your message stays here. Sign in a provider on the devbox, then send.",
+      }),
     );
-    if (devboxClaim.queuedSend) void onSendWithRouting();
   });
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the draft moves to the box asynchronously, after its environment registers.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the draft and its provider status arrive asynchronously from the devbox's environment.
   useEffect(() => {
-    finishDevboxClaim(devboxClaim.kind, environmentId);
-  }, [devboxClaim.kind, environmentId]);
+    finishDevboxClaim(devboxClaim.kind, environmentId, devboxProviderReady);
+    if (devboxClaim.kind !== "switched" || devboxProviderReady) return;
+    const timer = setTimeout(abandonQueuedDevboxSend, 120_000);
+    return () => clearTimeout(timer);
+  }, [devboxClaim.kind, environmentId, devboxProviderReady]);
 
   return { onSend: onSendWithRouting };
 }
