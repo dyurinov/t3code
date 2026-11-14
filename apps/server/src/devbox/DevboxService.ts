@@ -196,6 +196,23 @@ const make = Effect.gen(function* () {
     Ref.update(records, (current) => new Map(current).set(record.name, record)).pipe(
       Effect.andThen(save()),
     );
+  // Background setup, the sign-in handout and claims all touch the same record; each changes
+  // only its own fields on the current copy, so none of them undoes another.
+  const updateRecord = (name: string, change: (record: DevboxRecord) => DevboxRecord) =>
+    Ref.modify(records, (current) => {
+      const existing = current.get(name);
+      if (existing === undefined) return [undefined, current] as const;
+      const next = change(existing);
+      return [next, new Map(current).set(name, next)] as const;
+    }).pipe(
+      Effect.flatMap((next) =>
+        next === undefined
+          ? Effect.fail(
+              new DevboxError({ reason: "not_found", message: `No devbox named ${name}.` }),
+            )
+          : save().pipe(Effect.as(next)),
+      ),
+    );
   const getRecord = (name: string) =>
     Ref.get(records).pipe(
       Effect.flatMap((current) => {
@@ -430,9 +447,10 @@ const make = Effect.gen(function* () {
         expectedLabel: record.name,
       })
       .pipe(Effect.mapError(devboxError("link")));
-    const next = { ...record, environmentId: linked.environmentId };
-    yield* putRecord(next);
-    return next;
+    return yield* updateRecord(record.name, (current) => ({
+      ...current,
+      environmentId: linked.environmentId,
+    }));
   });
 
   // ── provisioning ─────────────────────────────────────────────────────────
@@ -456,18 +474,20 @@ const make = Effect.gen(function* () {
       yield* claim.commit.pipe(Effect.mapError(devboxError("provision")));
     }
     const state = (
+      current: DevboxRecord,
       provider: "claude" | "codex",
       claimed: Option.Option<unknown>,
     ): DevboxCredentialState =>
-      record.credentials[provider] === "installed" || Option.isSome(claimed)
+      current.credentials[provider] === "installed" || Option.isSome(claimed)
         ? "installed"
         : "pool-empty";
-    const next = {
-      ...record,
-      credentials: { claude: state("claude", claim.claude), codex: state("codex", claim.codex) },
-    };
-    yield* putRecord(next);
-    return next;
+    return yield* updateRecord(record.name, (current) => ({
+      ...current,
+      credentials: {
+        claude: state(current, "claude", claim.claude),
+        codex: state(current, "codex", claim.codex),
+      },
+    }));
   });
 
   /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
@@ -492,8 +512,10 @@ const make = Effect.gen(function* () {
       PROVISION_SCRIPT,
       "15 minutes",
     );
-    const provisioned = { ...record, provisioned: PROVISION_REVISION };
-    yield* putRecord(provisioned);
+    const provisioned = yield* updateRecord(record.name, (current) => ({
+      ...current,
+      provisioned: PROVISION_REVISION,
+    }));
     yield* startTunnel(provisioned);
     return yield* link(provisioned);
   });
@@ -744,10 +766,8 @@ const make = Effect.gen(function* () {
     );
     const picked = ranked[0];
     const name = picked === undefined ? (yield* startCreate({}, false)).name : picked.name;
-    if (picked !== undefined) {
-      const { spare: _spare, ...claimed } = picked;
-      yield* putRecord(claimed);
-    }
+    if (picked !== undefined)
+      yield* updateRecord(picked.name, ({ spare: _spare, ...claimed }) => claimed);
     yield* FiberSet.run(background, ensureSpares);
     const settled = yield* awaitReady(name, CREATE_TIMEOUT);
     if (settled.state !== "running" || settled.environmentId === null) yield* wakeNow(name);
@@ -757,13 +777,13 @@ const make = Effect.gen(function* () {
     return { ...pairing, name };
   }).pipe(Effect.withSpan("DevboxService.claim"));
 
-  // Hands pooled sign-ins to running boxes without them, spares first. Sign-ins are minted only
+  // Hands pooled sign-ins to running boxes without them. Sign-ins are minted only
   // when the user asks (`startLogin`), so no browser window opens on its own.
   const distributeLogins = Effect.gen(function* () {
     const all = yield* workspaces;
-    // Spares first: they are the boxes someone takes next.
+    // Boxes in use first: someone is waiting on them; spares get the next sign-in.
     const ordered = [...(yield* Ref.get(records)).values()].toSorted(
-      (a, b) => Number(b.spare === true) - Number(a.spare === true),
+      (a, b) => Number(a.spare === true) - Number(b.spare === true),
     );
     for (const record of ordered) {
       const missing =

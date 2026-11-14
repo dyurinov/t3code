@@ -56,6 +56,22 @@ export function useNewDevbox() {
       name: claimed.value.name,
       queuedSend: current.kind === "idle" ? false : current.queuedSend,
     }));
+    // The draft moves once the box lists this project; one that never does must not hang.
+    setTimeout(() => {
+      let stuck = false;
+      setState((current) => {
+        stuck = current.kind === "ready" && current.environmentId === claimed.value.environmentId;
+        return stuck ? { kind: "idle" } : current;
+      });
+      if (stuck)
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `${claimed.value.name} is connected, but this project is not on it`,
+            description: "Pick it under Run on once its project appears.",
+          }),
+        );
+    }, 90_000);
   };
 
   return { available, state, start };
