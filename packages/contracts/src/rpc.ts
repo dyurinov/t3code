@@ -27,6 +27,16 @@ import {
   PeerLinkSummary,
 } from "./peerLink.ts";
 import {
+  DevboxClientPairing,
+  DevboxCreateInput,
+  DevboxDeleteInput,
+  DevboxDeleteResult,
+  DevboxError,
+  DevboxListResult,
+  DevboxNameInput,
+  DevboxSummary,
+} from "./devbox.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -523,6 +533,12 @@ export const WS_METHODS = {
   peerLinksLink: "peerLinks.link",
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
+  devboxesList: "devboxes.list",
+  devboxesCreate: "devboxes.create",
+  devboxesWake: "devboxes.wake",
+  devboxesStop: "devboxes.stop",
+  devboxesDelete: "devboxes.delete",
+  devboxesPairClient: "devboxes.pairClient",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverCheckSecretSource: "server.checkSecretSource",
@@ -862,6 +878,38 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const devboxErrors = Schema.Union([DevboxError, EnvironmentAuthorizationError]);
+const WsDevboxesListRpc = Rpc.make(WS_METHODS.devboxesList, {
+  payload: Schema.Struct({}),
+  success: DevboxListResult,
+  error: devboxErrors,
+});
+const WsDevboxesCreateRpc = Rpc.make(WS_METHODS.devboxesCreate, {
+  payload: DevboxCreateInput,
+  success: DevboxSummary,
+  error: devboxErrors,
+});
+const WsDevboxesWakeRpc = Rpc.make(WS_METHODS.devboxesWake, {
+  payload: DevboxNameInput,
+  success: DevboxSummary,
+  error: devboxErrors,
+});
+const WsDevboxesStopRpc = Rpc.make(WS_METHODS.devboxesStop, {
+  payload: DevboxNameInput,
+  success: DevboxSummary,
+  error: devboxErrors,
+});
+const WsDevboxesDeleteRpc = Rpc.make(WS_METHODS.devboxesDelete, {
+  payload: DevboxDeleteInput,
+  success: DevboxDeleteResult,
+  error: devboxErrors,
+});
+const WsDevboxesPairClientRpc = Rpc.make(WS_METHODS.devboxesPairClient, {
+  payload: DevboxNameInput,
+  success: DevboxClientPairing,
+  error: devboxErrors,
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -2138,6 +2186,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
   WsPeerLinksAnswerRequestRpc,
+  WsDevboxesListRpc,
+  WsDevboxesCreateRpc,
+  WsDevboxesWakeRpc,
+  WsDevboxesStopRpc,
+  WsDevboxesDeleteRpc,
+  WsDevboxesPairClientRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerCheckSecretSourceRpc,
   WsServerSearchAcpRegistryRpc,

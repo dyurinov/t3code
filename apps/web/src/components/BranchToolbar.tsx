@@ -5,7 +5,14 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import { FolderGit2Icon, FolderGitIcon, FolderIcon, PlusIcon, ScaleIcon } from "lucide-react";
+import {
+  FolderGit2Icon,
+  FolderGitIcon,
+  FolderIcon,
+  PlusIcon,
+  ScaleIcon,
+  ServerIcon,
+} from "lucide-react";
 import {
   type Ref,
   type MouseEvent as ReactMouseEvent,
@@ -37,6 +44,7 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
+import { NewDevboxDialog } from "./devbox/NewDevboxDialog";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -152,6 +160,7 @@ interface RunContextSelectorProps {
   onUsePreviousWorktree: () => void;
   addTargets: readonly AddProjectTarget[];
   onAddToMachine: (environmentId: EnvironmentId) => void;
+  onNewDevbox: (() => void) | undefined;
 }
 
 const RunContextSelector = memo(function RunContextSelector({
@@ -175,6 +184,7 @@ const RunContextSelector = memo(function RunContextSelector({
   onUsePreviousWorktree,
   addTargets,
   onAddToMachine,
+  onNewDevbox,
 }: RunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment =
@@ -378,6 +388,14 @@ const RunContextSelector = memo(function RunContextSelector({
                     ))}
                   </MenuSubPopup>
                 </MenuSub>
+              ) : null}
+              {onNewDevbox ? (
+                <MenuItem onClick={onNewDevbox}>
+                  <span className={ADD_TO_MACHINE_LABEL_CLASS}>
+                    <ServerIcon className="size-3" />
+                    <span className="min-w-0 truncate">New devbox</span>
+                  </span>
+                </MenuItem>
               ) : null}
             </MenuGroup>
             <MenuSeparator />
@@ -663,6 +681,21 @@ export const BranchToolbar = memo(function BranchToolbar({
   );
 
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
+  const [newDevboxOpen, setNewDevboxOpen] = useState(false);
+  const onNewDevbox =
+    onEnvironmentChange !== undefined && !envLocked ? () => setNewDevboxOpen(true) : undefined;
+  const newDevboxDialog =
+    onNewDevbox === undefined ? null : (
+      <NewDevboxDialog
+        open={newDevboxOpen}
+        initialTask=""
+        onClose={() => setNewDevboxOpen(false)}
+        onReady={(readyEnvironmentId) => {
+          setNewDevboxOpen(false);
+          onEnvironmentChange?.(readyEnvironmentId);
+        }}
+      />
+    );
   const onAddToMachine = (targetEnvironmentId: EnvironmentId | null) =>
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
   // A project on one machine still gets the picker when it can be added to another.
@@ -683,6 +716,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (layout === "panel") {
     return (
       <div className="flex w-full flex-col" data-thread-panel-run-context>
+        {newDevboxDialog}
         {panelSection !== "branch" ? (
           <RunContextSelector
             displayMode="panel"
@@ -705,6 +739,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             onUsePreviousWorktree={onUsePreviousWorktree}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
+            onNewDevbox={onNewDevbox}
           />
         ) : null}
         {panelSection !== "workspace" ? (
@@ -734,6 +769,7 @@ export const BranchToolbar = memo(function BranchToolbar({
       data-compact={labelsOverflow ? "" : undefined}
       className={cn("gap-1 text-xs font-normal text-foreground/70 dark:text-muted-foreground")}
     >
+      {newDevboxDialog}
       {showGitControls ? (
         <div className="contents @xl/composer-surface:hidden">
           <RunContextSelector
@@ -755,6 +791,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             onUsePreviousWorktree={onUsePreviousWorktree}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
+            onNewDevbox={onNewDevbox}
           />
         </div>
       ) : null}
@@ -776,6 +813,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 availableEnvironments={availableEnvironments}
                 {...(showEnvironmentPicker ? { onEnvironmentChange } : {})}
                 {...(addTargets.length > 0 ? { onAddToMachine: () => onAddToMachine(null) } : {})}
+                onNewDevbox={onNewDevbox}
               />
               {showGitControls ? (
                 <Separator

@@ -5,7 +5,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { shortcutLabelForCommand } from "../keybindings";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { PlusIcon, ScaleIcon } from "lucide-react";
+import { PlusIcon, ScaleIcon, ServerIcon } from "lucide-react";
 import { memo } from "react";
 
 import { ADD_TO_MACHINE_LABEL_CLASS, type EnvironmentOption } from "./BranchToolbar.logic";
@@ -28,11 +28,13 @@ interface BranchToolbarEnvironmentSelectorProps {
   availableEnvironments: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   onAddToMachine?: (() => void) | undefined;
+  onNewDevbox?: (() => void) | undefined;
 }
 
 // Action values cannot collide with server-minted environment IDs.
 const AUTO_VALUE = "action:auto";
 const ADD_MACHINE_VALUE = "action:add-machine";
+const NEW_DEVBOX_VALUE = "action:new-devbox";
 const environmentValue = (id: EnvironmentId) => `env:${id}`;
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -43,6 +45,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   availableEnvironments,
   onEnvironmentChange,
   onAddToMachine,
+  onNewDevbox,
 }: BranchToolbarEnvironmentSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const shortcutLabel = shortcutLabelForCommand(
@@ -61,6 +64,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       label: env.label,
     })),
     ...(onAddToMachine ? [{ value: ADD_MACHINE_VALUE, label: "Add to another machine" }] : []),
+    ...(onNewDevbox ? [{ value: NEW_DEVBOX_VALUE, label: "New devbox" }] : []),
   ];
 
   // Match the xs control's height and padding: the composer strip has no min-height,
@@ -93,6 +97,8 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       onValueChange={(value) => {
         if (value === ADD_MACHINE_VALUE) {
           onAddToMachine?.();
+        } else if (value === NEW_DEVBOX_VALUE) {
+          onNewDevbox?.();
         } else if (value === AUTO_VALUE) {
           onAutoEnvironment?.();
         } else if (value?.startsWith("env:")) {
@@ -163,6 +169,14 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               <span className={ADD_TO_MACHINE_LABEL_CLASS}>
                 <PlusIcon aria-hidden="true" className="size-3" />
                 Add to another machine
+              </span>
+            </SelectItem>
+          ) : null}
+          {onNewDevbox ? (
+            <SelectItem value={NEW_DEVBOX_VALUE}>
+              <span className={ADD_TO_MACHINE_LABEL_CLASS}>
+                <ServerIcon aria-hidden="true" className="size-3" />
+                New devbox
               </span>
             </SelectItem>
           ) : null}

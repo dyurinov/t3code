@@ -78,6 +78,12 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.peerLinksUnlink]: AuthAccessWriteScope,
   // A link lets every agent here reach the other environment: Settings' bar.
   [WS_METHODS.peerLinksAnswerRequest]: AuthAccessWriteScope,
+  // Devboxes cost money and hold this user's logins; a pairing code grants full access to one.
+  [WS_METHODS.devboxesCreate]: AuthAccessWriteScope,
+  [WS_METHODS.devboxesWake]: AuthAccessWriteScope,
+  [WS_METHODS.devboxesStop]: AuthAccessWriteScope,
+  [WS_METHODS.devboxesDelete]: AuthAccessWriteScope,
+  [WS_METHODS.devboxesPairClient]: AuthAccessWriteScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

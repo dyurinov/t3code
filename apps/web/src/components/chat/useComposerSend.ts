@@ -59,6 +59,9 @@ import {
 import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { environmentCatalog } from "../../connection/catalog";
+import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { newMessageId, newThreadId } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
@@ -366,6 +369,9 @@ export function useComposerSend(input: ComposerSendInput) {
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
+  const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
+  const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
+  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
   const pendingApprovalsRef = useRef(pendingApprovals);
   const respondingRequestIdsRef = useRef(respondingRequestIds);
@@ -470,6 +476,23 @@ export function useComposerSend(input: ComposerSendInput) {
           ),
         }),
       });
+      return;
+    }
+    const sleepingDevbox = activeEnvironmentUnavailable
+      ? devboxForEnvironment(devboxes, environmentId)
+      : null;
+    if (sleepingDevbox !== null && sleepingDevbox.state !== "running" && devboxHostId !== null) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: `Waking ${sleepingDevbox.name}`,
+          description:
+            "Your message stays here. Send it again once the devbox is connected (about 2 minutes).",
+        }),
+      );
+      void wakeDevbox({ environmentId: devboxHostId, input: { name: sleepingDevbox.name } }).then(
+        (woke) => (woke._tag === "Success" ? retryEnvironment(environmentId) : undefined),
+      );
       return;
     }
     if (activeEnvironmentUnavailable) {

@@ -88,3 +88,11 @@ export type DevboxListResult = typeof DevboxListResult.Type;
 
 export const DevboxDeleteResult = Schema.Struct({ name: Schema.String, deleted: Schema.Boolean });
 export type DevboxDeleteResult = typeof DevboxDeleteResult.Type;
+
+/** What a client needs to connect to a devbox directly: its loopback URL and a one-time code. */
+export const DevboxClientPairing = Schema.Struct({
+  environmentId: EnvironmentId,
+  url: Schema.String,
+  pairingCode: Schema.String,
+});
+export type DevboxClientPairing = typeof DevboxClientPairing.Type;

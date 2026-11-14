@@ -8,6 +8,7 @@ import * as NodeOS from "node:os";
 
 import {
   DevboxError,
+  type DevboxClientPairing,
   type DevboxCreateInput,
   type DevboxCredentialState,
   type DevboxState,
@@ -92,6 +93,8 @@ export class DevboxService extends Context.Service<
       name: string,
       options: { readonly force: boolean },
     ) => Effect.Effect<void, DevboxError>;
+    /** A one-time code for a client to connect to the box at its loopback URL. */
+    readonly pairClient: (name: string) => Effect.Effect<DevboxClientPairing, DevboxError>;
     /** The devbox an environment id belongs to, if any. */
     readonly byEnvironment: (
       environmentId: EnvironmentId,
@@ -328,6 +331,25 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const mintPairingCode = Effect.fn("DevboxService.mintPairingCode")(function* (
+    name: string,
+    version: string,
+    label: string,
+  ) {
+    const paired = yield* ssh(
+      name,
+      `sh -s -- ${shellQuote(version)} ${shellQuote(label)}`,
+      PAIR_SCRIPT,
+    );
+    const code = parsePairingToken(paired);
+    if (!code)
+      return yield* new DevboxError({
+        reason: "link",
+        message: "The box did not return a pairing code.",
+      });
+    return code;
+  });
+
   const link = Effect.fn("DevboxService.link")(function* (record: DevboxRecord, version: string) {
     if (record.environmentId !== null) {
       const existing = yield* peerLinks
@@ -554,6 +576,20 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const pairClient: DevboxService["Service"]["pairClient"] = Effect.fn("DevboxService.pairClient")(
+    function* (name) {
+      const record = yield* getRecord(name);
+      if (record.environmentId === null)
+        return yield* new DevboxError({ reason: "invalid", message: `${name} is not linked yet.` });
+      const pairingCode = yield* mintPairingCode(name, yield* t3Version, "T3 Code client");
+      return {
+        environmentId: record.environmentId as EnvironmentId,
+        url: `http://127.0.0.1:${record.localPort}`,
+        pairingCode,
+      };
+    },
+  );
+
   const byEnvironment: DevboxService["Service"]["byEnvironment"] = (environmentId) =>
     Ref.get(records).pipe(
       Effect.flatMap((current) => {
@@ -596,7 +632,16 @@ const make = Effect.gen(function* () {
     ),
   );
 
-  return DevboxService.of({ list, create, awaitReady, wake, stop, remove, byEnvironment });
+  return DevboxService.of({
+    list,
+    create,
+    awaitReady,
+    wake,
+    stop,
+    remove,
+    pairClient,
+    byEnvironment,
+  });
 });
 
 function shellQuote(value: string): string {

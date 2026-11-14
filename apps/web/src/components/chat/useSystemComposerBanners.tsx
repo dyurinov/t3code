@@ -25,6 +25,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { ServerUpdateAction, serverUpdateStageLabel } from "../ServerUpdateAction";
 import { useAutoBalanceUpdateBanner } from "./useAutoBalanceUpdateBanner";
+import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
 import { ComposerServerUpdateIcon } from "./ComposerServerUpdateStatus";
 import {
   dismissServerUpdateFailure,
@@ -71,6 +72,34 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
+  const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
+  const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
+  const [wakingDevbox, setWakingDevbox] = useState(false);
+  const unavailableDevbox = devboxForEnvironment(
+    devboxes,
+    activeEnvironmentUnavailableState?.environmentId ?? null,
+  );
+  const handleWakeDevbox = async (name: string, environmentId: EnvironmentId) => {
+    if (devboxHostId === null) return;
+    setWakingDevbox(true);
+    const woke = await wakeDevbox({ environmentId: devboxHostId, input: { name } });
+    setWakingDevbox(false);
+    if (woke._tag === "Failure") {
+      if (!isAtomCommandInterrupted(woke)) {
+        const error = squashAtomCommandFailure(woke);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `Could not wake ${name}`,
+            description: error instanceof Error ? error.message : "Waking failed.",
+          }),
+        );
+      }
+      return;
+    }
+    await retryEnvironment(environmentId);
+  };
+  const handleWakeDevboxStable = useStableCallback(handleWakeDevbox);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
@@ -192,16 +221,36 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
         variant: unavailableConnection.phase === "error" ? "error" : "warning",
         group: "environment",
         icon: <WifiOffIcon />,
-        title: awaitingApproval
-          ? `${activeEnvironmentUnavailableState.label} is waiting to approve this device`
-          : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
-        description: awaitingApproval ? (
-          (unavailableConnection.error ?? undefined)
-        ) : activeEnvironment ? (
-          <ConnectionDiagnosisHeadline environment={activeEnvironment} />
-        ) : undefined,
+        title:
+          unavailableDevbox !== null && unavailableDevbox.state !== "running"
+            ? `${unavailableDevbox.name} is ${wakingDevbox || unavailableDevbox.state === "starting" ? "waking up" : "sleeping"}`
+            : awaitingApproval
+              ? `${activeEnvironmentUnavailableState.label} is waiting to approve this device`
+              : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+        description:
+          unavailableDevbox !== null && unavailableDevbox.state !== "running" ? (
+            "Wake it to continue. Starting a sleeping devbox takes about 2 minutes."
+          ) : awaitingApproval ? (
+            (unavailableConnection.error ?? undefined)
+          ) : activeEnvironment ? (
+            <ConnectionDiagnosisHeadline environment={activeEnvironment} />
+          ) : undefined,
         actions: (
           <>
+            {unavailableDevbox !== null && unavailableDevbox.state !== "running" ? (
+              <Button
+                size="xs"
+                disabled={wakingDevbox || unavailableDevbox.state === "starting"}
+                onClick={() =>
+                  void handleWakeDevboxStable(
+                    unavailableDevbox.name,
+                    activeEnvironmentUnavailableState.environmentId,
+                  )
+                }
+              >
+                {wakingDevbox ? "Waking…" : "Wake devbox"}
+              </Button>
+            ) : null}
             {unavailableConnection.phase !== "connecting" ? (
               <Button
                 size="xs"
