@@ -2,7 +2,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import { type EnvironmentId } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { useAtomValue } from "@effect/atom-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   isAtomCommandInterrupted,
@@ -73,7 +73,23 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
-  const { hostEnvironmentId: devboxHostId, devboxes, pendingLogins } = useDevboxes();
+  const {
+    hostEnvironmentId: devboxHostId,
+    available: devboxesAvailable,
+    devboxes,
+    pendingLogins,
+    refresh: refreshDevboxes,
+  } = useDevboxes();
+  // Sign-ins and box states change on the host with nothing pushed; poll faster while one waits.
+  const devboxesBusy =
+    pendingLogins.length > 0 ||
+    devboxes.some((devbox) => devbox.state === "creating" || devbox.state === "starting");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls host-side devbox and sign-in state, which the server does not push.
+  useEffect(() => {
+    if (!devboxesAvailable) return;
+    const timer = setInterval(refreshDevboxes, devboxesBusy ? 4_000 : 20_000);
+    return () => clearInterval(timer);
+  }, [devboxesAvailable, devboxesBusy, refreshDevboxes]);
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const [wakingDevbox, setWakingDevbox] = useState(false);
   const unavailableDevbox = devboxForEnvironment(
@@ -280,7 +296,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
         title: `${providerName} needs one sign-in for your devboxes`,
         description:
           login.provider === "claude"
-            ? "Approve it in the browser, then paste the code the page shows."
+            ? "Approve, then paste the code here."
             : "Approve it in the browser so new devboxes come signed in to Codex.",
         actions:
           devboxHostId === null ? undefined : (
