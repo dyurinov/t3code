@@ -62,7 +62,7 @@ const DevboxWaitTool = Tool.make("devbox_wait", {
 const DevboxWakeTool = Tool.make("devbox_wake", {
   ...shared,
   description:
-    "Start a stopped devbox and reconnect it (about 2 minutes). Needed before working on a box that went to sleep.",
+    "Start waking a sleeping devbox; returns at once in state `starting`. It takes about 2 minutes; then call `devbox_wait`.",
   parameters: DevboxNameInput,
   success: DevboxSummary,
 })

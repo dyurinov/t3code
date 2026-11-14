@@ -104,7 +104,7 @@ export class DevboxService extends Context.Service<
       name: string,
       timeout: Duration.Input,
     ) => Effect.Effect<DevboxSummary, DevboxError>;
-    /** Starts a stopped box and reconnects it. Returns once its T3 server answers here. */
+    /** Starts waking a stopped box and returns at once in state `starting`. */
     readonly wake: (name: string) => Effect.Effect<DevboxSummary, DevboxError>;
     readonly stop: (name: string) => Effect.Effect<DevboxSummary, DevboxError>;
     readonly remove: (
@@ -592,7 +592,8 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const wake: DevboxService["Service"]["wake"] = Effect.fn("DevboxService.wake")(function* (name) {
+  /** Starts the box and reconnects it, returning once it answers here. */
+  const wakeNow = Effect.fn("DevboxService.wakeNow")(function* (name: string) {
     const record = yield* getRecord(name);
     yield* locks.withLock(
       name,
@@ -609,6 +610,16 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
+    return yield* summaryOf(name);
+  });
+
+  // Waking takes minutes; callers follow the box's state instead of holding a request open.
+  const wake: DevboxService["Service"]["wake"] = Effect.fn("DevboxService.wake")(function* (name) {
+    yield* getRecord(name);
+    yield* setTransient(name, { state: "starting", lastError: null });
+    yield* FiberMap.run(creations, name, wakeNow(name).pipe(Effect.ignore), {
+      onlyIfMissing: true,
+    });
     return yield* summaryOf(name);
   });
 
@@ -708,7 +719,7 @@ const make = Effect.gen(function* () {
     }
     yield* FiberSet.run(background, ensureSpares);
     const settled = yield* awaitReady(name, CREATE_TIMEOUT);
-    if (settled.state !== "running" || settled.environmentId === null) yield* wake(name);
+    if (settled.state !== "running" || settled.environmentId === null) yield* wakeNow(name);
     // After a restart the forward to a running box may not be up yet; the client needs it now.
     else yield* startTunnel(yield* getRecord(name));
     const pairing = yield* pairClient(name);

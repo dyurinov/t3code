@@ -2,7 +2,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import { type EnvironmentId } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   isAtomCommandInterrupted,
@@ -51,6 +51,8 @@ interface SystemComposerBannersInput {
   readonly hasMultipleRegisteredEnvironments: boolean;
   readonly automaticEnvironment: boolean;
   readonly autoUpdateEnvironments: ReadonlyArray<EnvironmentPresentation>;
+  /** An unsent draft, where a devbox can be chosen. */
+  readonly isDraft: boolean;
 }
 
 /**
@@ -96,11 +98,23 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     devboxes,
     activeEnvironmentUnavailableState?.environmentId ?? null,
   );
-  const handleWakeDevbox = async (name: string, environmentId: EnvironmentId) => {
+  // Waking returns at once; the host's list shows `starting`, then `running` once it answers.
+  const devboxPhase =
+    unavailableDevbox === null
+      ? null
+      : wakingDevbox || unavailableDevbox.state === "starting"
+        ? "starting"
+        : unavailableDevbox.state === "failed"
+          ? "failed"
+          : unavailableDevbox.state === "running"
+            ? null
+            : "sleeping";
+  const handleWakeDevbox = async (name: string) => {
     if (devboxHostId === null) return;
     setWakingDevbox(true);
     const woke = await wakeDevbox({ environmentId: devboxHostId, input: { name } });
     setWakingDevbox(false);
+    refreshDevboxes();
     if (woke._tag === "Failure") {
       if (!isAtomCommandInterrupted(woke)) {
         const error = squashAtomCommandFailure(woke);
@@ -112,11 +126,23 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
           }),
         );
       }
-      return;
     }
-    await retryEnvironment(environmentId);
   };
   const handleWakeDevboxStable = useStableCallback(handleWakeDevbox);
+  // Reconnect as soon as the host reports the box up, instead of waiting for the next retry.
+  const devboxReadyToReconnect =
+    unavailableDevbox !== null &&
+    unavailableDevbox.state === "running" &&
+    unavailableDevbox.environmentId !== null
+      ? unavailableDevbox.environmentId
+      : null;
+  const reconnectDevbox = useEffectEvent((environmentId: EnvironmentId) => {
+    void retryEnvironment(environmentId);
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the box comes up on the host; this client's connection to it has to be retried then.
+  useEffect(() => {
+    if (devboxReadyToReconnect !== null) reconnectDevbox(devboxReadyToReconnect);
+  }, [devboxReadyToReconnect]);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
@@ -239,14 +265,22 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
         group: "environment",
         icon: <WifiOffIcon />,
         title:
-          unavailableDevbox !== null && unavailableDevbox.state !== "running"
-            ? `${unavailableDevbox.name} is ${wakingDevbox || unavailableDevbox.state === "starting" ? "waking up" : "sleeping"}`
-            : awaitingApproval
-              ? `${activeEnvironmentUnavailableState.label} is waiting to approve this device`
-              : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+          devboxPhase === "starting"
+            ? `Starting ${unavailableDevbox?.name ?? "the devbox"}…`
+            : devboxPhase === "failed"
+              ? `${unavailableDevbox?.name ?? "The devbox"} did not start`
+              : devboxPhase === "sleeping"
+                ? `${unavailableDevbox?.name ?? "The devbox"} is sleeping`
+                : awaitingApproval
+                  ? `${activeEnvironmentUnavailableState.label} is waiting to approve this device`
+                  : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
         description:
-          unavailableDevbox !== null && unavailableDevbox.state !== "running" ? (
-            "Wake it to continue. Starting a sleeping devbox takes about 2 minutes."
+          devboxPhase === "starting" ? (
+            "About 2 minutes. Your draft stays here."
+          ) : devboxPhase === "failed" ? (
+            (unavailableDevbox?.lastError ?? "Starting it failed.")
+          ) : devboxPhase === "sleeping" ? (
+            "Wake it to keep working. Sending a message wakes it too."
           ) : awaitingApproval ? (
             (unavailableConnection.error ?? undefined)
           ) : activeEnvironment ? (
@@ -254,18 +288,14 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
           ) : undefined,
         actions: (
           <>
-            {unavailableDevbox !== null && unavailableDevbox.state !== "running" ? (
+            {unavailableDevbox !== null &&
+            (devboxPhase === "sleeping" || devboxPhase === "failed") ? (
               <Button
                 size="xs"
-                disabled={wakingDevbox || unavailableDevbox.state === "starting"}
-                onClick={() =>
-                  void handleWakeDevboxStable(
-                    unavailableDevbox.name,
-                    activeEnvironmentUnavailableState.environmentId,
-                  )
-                }
+                disabled={wakingDevbox}
+                onClick={() => void handleWakeDevboxStable(unavailableDevbox.name)}
               >
-                {wakingDevbox ? "Waking…" : "Wake devbox"}
+                {devboxPhase === "failed" ? "Try again" : "Wake devbox"}
               </Button>
             ) : null}
             {unavailableConnection.phase !== "connecting" ? (
@@ -286,7 +316,8 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
         ),
       });
     }
-    for (const login of pendingLogins) {
+    // Shown where a devbox gets picked, not over every running conversation.
+    for (const login of input.isDraft ? pendingLogins : []) {
       const providerName = login.provider === "codex" ? "Codex" : "Claude";
       items.push({
         id: `devbox-login:${login.provider}`,

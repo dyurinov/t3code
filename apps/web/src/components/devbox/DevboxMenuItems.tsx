@@ -27,6 +27,7 @@ export function DevboxMenuItems({ environmentId }: { readonly environmentId: Env
       { variant: "destructive" },
     );
     if (!confirmed) return;
+    toastManager.add(stackedThreadToast({ type: "info", title: `Deleting ${devbox.name}…` }));
     const deleted = await remove({
       environmentId: hostEnvironmentId,
       input: { name: devbox.name, force: true },

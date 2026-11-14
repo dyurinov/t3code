@@ -1344,6 +1344,7 @@ export default function ChatView(props: ChatViewProps) {
     hasMultipleRegisteredEnvironments: environments.length > 1,
     automaticEnvironment,
     autoUpdateEnvironments,
+    isDraft: draftId !== null,
   });
   const providerInstanceEntries = providerInstanceEntriesFor(
     providerStatuses,

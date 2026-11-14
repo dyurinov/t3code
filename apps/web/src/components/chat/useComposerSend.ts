@@ -61,7 +61,6 @@ import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { isProviderInstancePickerReady } from "../../providerInstances";
 import { useAtom } from "@effect/atom-react";
-import { environmentCatalog } from "../../connection/catalog";
 import {
   devboxEnvironment,
   devboxForEnvironment,
@@ -379,7 +378,6 @@ export function useComposerSend(input: ComposerSendInput) {
   const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
   const [devboxClaim, setDevboxClaim] = useAtom(devboxClaimAtom);
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
-  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
   const pendingApprovalsRef = useRef(pendingApprovals);
   const respondingRequestIdsRef = useRef(respondingRequestIds);
@@ -501,17 +499,23 @@ export function useComposerSend(input: ComposerSendInput) {
       ? devboxForEnvironment(devboxes, environmentId)
       : null;
     if (sleepingDevbox !== null && sleepingDevbox.state !== "running" && devboxHostId !== null) {
+      // Wake it and hold the message: it goes out once the box is back and a provider is ready.
+      if (sleepingDevbox.environmentId !== null) {
+        setDevboxClaim({
+          kind: "switched",
+          environmentId: sleepingDevbox.environmentId,
+          name: sleepingDevbox.name,
+          queuedSend: true,
+        });
+      }
       toastManager.add(
         stackedThreadToast({
           type: "info",
           title: `Waking ${sleepingDevbox.name}`,
-          description:
-            "Your message stays here. Send it again once the devbox is connected (about 2 minutes).",
+          description: "Your message sends when it is back, in about 2 minutes.",
         }),
       );
-      void wakeDevbox({ environmentId: devboxHostId, input: { name: sleepingDevbox.name } }).then(
-        (woke) => (woke._tag === "Success" ? retryEnvironment(environmentId) : undefined),
-      );
+      void wakeDevbox({ environmentId: devboxHostId, input: { name: sleepingDevbox.name } });
       return;
     }
     if (activeEnvironmentUnavailable) {
@@ -1579,7 +1583,8 @@ export function useComposerSend(input: ComposerSendInput) {
   useEffect(() => {
     finishDevboxClaim(devboxClaim.kind, environmentId, devboxProviderReady);
     if (devboxClaim.kind !== "switched" || devboxProviderReady) return;
-    const timer = setTimeout(abandonQueuedDevboxSend, 120_000);
+    // Waking a sleeping box takes a few minutes; a freshly taken one is ready far sooner.
+    const timer = setTimeout(abandonQueuedDevboxSend, 360_000);
     return () => clearTimeout(timer);
   }, [devboxClaim.kind, environmentId, devboxProviderReady]);
 
