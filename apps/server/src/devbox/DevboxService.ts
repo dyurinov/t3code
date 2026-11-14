@@ -472,7 +472,9 @@ const make = Effect.gen(function* () {
 
   /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
   const connect = Effect.fn("DevboxService.connect")(function* (stored: DevboxRecord) {
-    yield* coder(["ssh", "--wait=yes", stored.name, "--", "true"], "15 minutes");
+    // The startup script (codez refresh, full redeploy) can run for over 30 minutes; agents
+    // only need ssh and the checkout, so connect as soon as the box's agent answers.
+    yield* coder(["ssh", "--wait=no", stored.name, "--", "true"], "10 minutes");
     // A box whose creation stopped early, or that met an empty pool, still needs its logins.
     const record = yield* installCredentials(stored);
     // A box set up by this script starts T3 itself at boot: reconnecting is enough.
@@ -534,7 +536,6 @@ const make = Effect.gen(function* () {
       ),
     );
     yield* coder(["autoupdate", record.name, "always"]).pipe(Effect.ignore);
-    yield* coder(["ssh", "--wait=yes", record.name, "--", "true"], "30 minutes");
     yield* connect(record);
     yield* setTransient(record.name, undefined);
   });
@@ -878,6 +879,27 @@ const make = Effect.gen(function* () {
     Effect.catchCause((cause) => Effect.logWarning("devbox keep-awake failed", { cause })),
     Effect.repeat(Schedule.spaced(KEEP_ALIVE_INTERVAL)),
   );
+  // A running box left unconnected (a failed or interrupted setup) gets another try.
+  const heal = Effect.gen(function* () {
+    const all = yield* workspaces;
+    for (const record of (yield* Ref.get(records)).values()) {
+      if (record.environmentId !== null) continue;
+      if (all.get(record.name)?.latest_build.status !== "running") continue;
+      if (yield* FiberMap.has(creations, record.name)) continue;
+      yield* FiberMap.run(
+        creations,
+        record.name,
+        locks
+          .withLock(record.name, connect(record))
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("devbox setup retry failed", { name: record.name, cause }),
+            ),
+          ),
+      );
+    }
+  }).pipe(Effect.catchCause((cause) => Effect.logWarning("devbox heal failed", { cause })));
+  yield* forkParked(Effect.sleep(Duration.minutes(2)).pipe(Effect.andThen(heal), Effect.forever));
   yield* forkParked(distributeLogins.pipe(Effect.repeat(Schedule.spaced(Duration.minutes(5)))));
   yield* forkParked(
     reconnect.pipe(
