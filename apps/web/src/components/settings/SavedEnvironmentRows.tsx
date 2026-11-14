@@ -36,6 +36,7 @@ import {
 } from "./ConnectionDiagnosisDetails";
 import { usePreparedConnection } from "~/state/session";
 import { EnvironmentRow, environmentTransportLabel } from "./EnvironmentRow";
+import { DevboxMenuItems } from "../devbox/DevboxMenuItems";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -421,6 +422,7 @@ export function SavedBackendListRow({
           {errorTraceId ? (
             <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
           ) : null}
+          <DevboxMenuItems environmentId={environmentId} />
           <MenuSeparator />
           <MenuItem variant="destructive" onClick={() => onRemove(environment)}>
             {isRemoving ? "Removing…" : "Remove from this device…"}
