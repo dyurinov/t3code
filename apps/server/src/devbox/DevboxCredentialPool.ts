@@ -58,6 +58,11 @@ export class DevboxCredentialPool extends Context.Service<
     readonly mint: (
       provider: DevboxCredentialProvider,
     ) => Effect.Effect<string, DevboxCredentialError>;
+    /** Hands a waiting sign-in the code its approval page showed. */
+    readonly submitCode: (
+      provider: DevboxCredentialProvider,
+      code: string,
+    ) => Effect.Effect<void, DevboxCredentialError>;
     /** Sign-ins waiting for the user to approve them in a browser, with their links. */
     readonly pendingLogins: Effect.Effect<
       ReadonlyArray<{ readonly provider: DevboxCredentialProvider; readonly url: string }>
@@ -71,8 +76,34 @@ const decodeClaudeConfig = Schema.decodeUnknownEffect(
 );
 
 /** Gives a login command a terminal, which `claude auth login` needs, and passes its exit code. */
-const PTY_RUNNER = String.raw`import os, pty, sys
-status = pty.spawn(sys.argv[1:])
+/**
+ * Runs a login command in a terminal, which `claude auth login` needs, and types in the code
+ * the user pastes back (written to `.login-code` in the working directory). Passes the exit code.
+ */
+const PTY_RUNNER = String.raw`import os, pty, select, sys
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[1], sys.argv[1:])
+sent = False
+while True:
+    ready, _, _ = select.select([fd], [], [], 0.5)
+    if ready:
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        os.write(1, data)
+    if not sent and os.path.exists(".login-code"):
+        code = open(".login-code").read().strip()
+        if code:
+            os.write(fd, (code + "\r").encode())
+            sent = True
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        sys.exit(os.waitstatus_to_exitcode(status))
+_, status = os.waitpid(pid, 0)
 sys.exit(os.waitstatus_to_exitcode(status))
 `;
 
@@ -91,6 +122,7 @@ const make = Effect.gen(function* () {
   const searchPath = yield* Config.String("PATH").pipe(Config.withDefault(""));
   // The login link a running sign-in printed, until it finishes.
   const pending = new Map<DevboxCredentialProvider, string>();
+  const pendingDirs = new Map<DevboxCredentialProvider, string>();
 
   /**
    * The provider's own CLI. Asana's checkout puts `claude` and `codex` wrappers first on PATH
@@ -257,6 +289,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(fail(`Could not create ${free}`)));
       const id = `${yield* Clock.currentTimeMillis}`;
       const sessionDir = path.join(free, id);
+      pendingDirs.set(provider, sessionDir);
       yield* fs
         .makeDirectory(sessionDir, { mode: 0o700 })
         .pipe(Effect.mapError(fail(`Could not create ${sessionDir}`)));
@@ -288,7 +321,12 @@ const make = Effect.gen(function* () {
         .pipe(
           Effect.mapError(fail(`The ${provider} login did not finish`)),
           Effect.onError(() => discard),
-          Effect.ensuring(Effect.sync(() => pending.delete(provider))),
+          Effect.ensuring(
+            Effect.sync(() => {
+              pending.delete(provider);
+              pendingDirs.delete(provider);
+            }),
+          ),
         );
       const signedIn =
         provider === "claude"
@@ -310,7 +348,27 @@ const make = Effect.gen(function* () {
     [...pending].map(([provider, url]) => ({ provider, url })),
   );
 
-  return DevboxCredentialPool.of({ claim, release, freeCount, mint, pendingLogins });
+  const submitCode: DevboxCredentialPool["Service"]["submitCode"] = Effect.fn(
+    "DevboxCredentialPool.submitCode",
+  )(function* (provider, code) {
+    const sessionDir = pendingDirs.get(provider);
+    if (sessionDir === undefined)
+      return yield* new DevboxCredentialError({
+        message: `No ${provider} sign-in is waiting for a code.`,
+      });
+    yield* fs
+      .writeFileString(path.join(sessionDir, ".login-code"), code.trim(), { mode: 0o600 })
+      .pipe(Effect.mapError(fail("Could not hand the code to the sign-in")));
+  });
+
+  return DevboxCredentialPool.of({
+    claim,
+    release,
+    freeCount,
+    mint,
+    submitCode,
+    pendingLogins,
+  });
 });
 
 export const layer = Layer.effect(DevboxCredentialPool, make);

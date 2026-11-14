@@ -2670,6 +2670,8 @@ export const layerWsRpc = (
           devboxes.remove(name, { force: force ?? false }).pipe(Effect.as({ name, deleted: true })),
         [WS_METHODS.devboxesPairClient]: ({ name }) => devboxes.pairClient(name),
         [WS_METHODS.devboxesClaim]: (_input) => devboxes.claim,
+        [WS_METHODS.devboxesSubmitLoginCode]: ({ provider, code }) =>
+          devboxes.submitLoginCode(provider, code),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {

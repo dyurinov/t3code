@@ -90,6 +90,12 @@ export const DevboxPendingLogin = Schema.Struct({
 });
 export type DevboxPendingLogin = typeof DevboxPendingLogin.Type;
 
+export const DevboxSubmitLoginCodeInput = Schema.Struct({
+  provider: Schema.Literals(["claude", "codex"]),
+  code: TrimmedNonEmptyString,
+});
+export type DevboxSubmitLoginCodeInput = typeof DevboxSubmitLoginCodeInput.Type;
+
 export const DevboxListResult = Schema.Struct({
   devboxes: Schema.Array(DevboxSummary),
   /** Sign-ins for new devboxes that wait for the user's approval. */

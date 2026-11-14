@@ -86,6 +86,10 @@ export class DevboxService extends Context.Service<
   {
     readonly list: Effect.Effect<ReadonlyArray<DevboxSummary>, DevboxError>;
     readonly pendingLogins: Effect.Effect<ReadonlyArray<DevboxPendingLogin>>;
+    readonly submitLoginCode: (
+      provider: "claude" | "codex",
+      code: string,
+    ) => Effect.Effect<void, DevboxError>;
     /** Starts creating a box and returns at once; it shows as `creating` until linked. */
     readonly create: (input: DevboxCreateInput) => Effect.Effect<DevboxSummary, DevboxError>;
     /** Waits until the box is linked or failed, at most `timeout`. */
@@ -668,6 +672,12 @@ const make = Effect.gen(function* () {
     return { ...pairing, name };
   }).pipe(Effect.withSpan("DevboxService.claim"));
 
+  const submitLoginCode: DevboxService["Service"]["submitLoginCode"] = Effect.fn(
+    "DevboxService.submitLoginCode",
+  )(function* (provider, code) {
+    yield* pool.submitCode(provider, code).pipe(Effect.mapError(devboxError("invalid")));
+  });
+
   const byEnvironment: DevboxService["Service"]["byEnvironment"] = (environmentId) =>
     Ref.get(records).pipe(
       Effect.flatMap((current) => {
@@ -729,7 +739,11 @@ const make = Effect.gen(function* () {
         );
     }
     const all = yield* workspaces;
-    for (const record of (yield* Ref.get(records)).values()) {
+    // Spares first: they are the boxes someone takes next.
+    const ordered = [...(yield* Ref.get(records)).values()].toSorted(
+      (a, b) => Number(b.spare === true) - Number(a.spare === true),
+    );
+    for (const record of ordered) {
       const missing =
         record.credentials.claude !== "installed" || record.credentials.codex !== "installed";
       if (!missing || all.get(record.name)?.latest_build.status !== "running") continue;
@@ -754,6 +768,7 @@ const make = Effect.gen(function* () {
   return DevboxService.of({
     list,
     pendingLogins: pool.pendingLogins,
+    submitLoginCode,
     create,
     awaitReady,
     wake,

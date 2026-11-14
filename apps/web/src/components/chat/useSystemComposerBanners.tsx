@@ -9,7 +9,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { KeyRoundIcon, WifiOffIcon } from "lucide-react";
-import { readLocalApi } from "../../localApi";
+import { DevboxLoginActions } from "../devbox/DevboxLoginActions";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { environmentCatalog } from "../../connection/catalog";
 import { ConnectionDiagnosisHeadline } from "../settings/ConnectionDiagnosisDetails";
@@ -278,12 +278,14 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
         group: "environment",
         icon: <KeyRoundIcon />,
         title: `${providerName} needs one sign-in for your devboxes`,
-        description: `Approve it in the browser so new devboxes come signed in to ${providerName}.`,
-        actions: (
-          <Button size="xs" onClick={() => void readLocalApi()?.shell.openExternal(login.url)}>
-            Approve
-          </Button>
-        ),
+        description:
+          login.provider === "claude"
+            ? "Approve it in the browser, then paste the code the page shows."
+            : "Approve it in the browser so new devboxes come signed in to Codex.",
+        actions:
+          devboxHostId === null ? undefined : (
+            <DevboxLoginActions login={login} hostEnvironmentId={devboxHostId} />
+          ),
       });
     }
     // An available update is offered by the sidebar's update pill; the composer only shows one
