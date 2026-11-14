@@ -231,9 +231,8 @@ const make = Effect.gen(function* () {
     Effect.map((list) => new Map(list.map((workspace) => [workspace.name, workspace]))),
   );
 
-  const t3Version = Option.isSome(pinnedT3Version)
-    ? Effect.succeed(pinnedT3Version.value)
-    : environment.getDescriptor.pipe(Effect.map((descriptor) => descriptor.serverVersion));
+  // Boxes download T3 from upstream releases, which never carry this fork's own version.
+  const t3Version = Effect.succeed(Option.getOrElse(pinnedT3Version, () => "latest-nightly"));
 
   // ── summaries ────────────────────────────────────────────────────────────
   const coderState = (workspace: CoderWorkspace | undefined): DevboxState => {
@@ -333,14 +332,9 @@ const make = Effect.gen(function* () {
 
   const mintPairingCode = Effect.fn("DevboxService.mintPairingCode")(function* (
     name: string,
-    version: string,
     label: string,
   ) {
-    const paired = yield* ssh(
-      name,
-      `sh -s -- ${shellQuote(version)} ${shellQuote(label)}`,
-      PAIR_SCRIPT,
-    );
+    const paired = yield* ssh(name, `sh -s -- ${shellQuote(label)}`, PAIR_SCRIPT);
     const code = parsePairingToken(paired);
     if (!code)
       return yield* new DevboxError({
@@ -350,7 +344,7 @@ const make = Effect.gen(function* () {
     return code;
   });
 
-  const link = Effect.fn("DevboxService.link")(function* (record: DevboxRecord, version: string) {
+  const link = Effect.fn("DevboxService.link")(function* (record: DevboxRecord) {
     if (record.environmentId !== null) {
       const existing = yield* peerLinks
         .get(record.environmentId as EnvironmentId)
@@ -358,17 +352,7 @@ const make = Effect.gen(function* () {
       if (Option.isSome(existing)) return record;
     }
     const label = (yield* environment.getDescriptor).label;
-    const paired = yield* ssh(
-      record.name,
-      `sh -s -- ${shellQuote(version)} ${shellQuote(label)}`,
-      PAIR_SCRIPT,
-    );
-    const pairingCode = parsePairingToken(paired);
-    if (!pairingCode)
-      return yield* new DevboxError({
-        reason: "link",
-        message: "The box did not return a pairing code.",
-      });
+    const pairingCode = yield* mintPairingCode(record.name, label);
     const linked = yield* peerLinks
       .link({
         url: `http://127.0.0.1:${record.localPort}`,
@@ -417,7 +401,7 @@ const make = Effect.gen(function* () {
       "15 minutes",
     );
     yield* startTunnel(record);
-    return yield* link(record, version);
+    return yield* link(record);
   });
 
   const provision = Effect.fn("DevboxService.provision")(function* (
@@ -581,7 +565,7 @@ const make = Effect.gen(function* () {
       const record = yield* getRecord(name);
       if (record.environmentId === null)
         return yield* new DevboxError({ reason: "invalid", message: `${name} is not linked yet.` });
-      const pairingCode = yield* mintPairingCode(name, yield* t3Version, "T3 Code client");
+      const pairingCode = yield* mintPairingCode(name, "T3 Code client");
       return {
         environmentId: record.environmentId as EnvironmentId,
         url: `http://127.0.0.1:${record.localPort}`,

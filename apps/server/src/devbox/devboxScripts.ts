@@ -56,7 +56,7 @@ const REMOTE_T3_PORT = 3773;
 export { REMOTE_T3_PORT };
 
 /**
- * Runs on the box as `sh -s -- <version> <name>`: installs that T3 release, runs it as a systemd
+ * Runs on the box as `sh -s -- <version|latest-nightly> <name>`: installs that T3 release, runs it as a systemd
  * user service (boxes linger, so it outlives SSH sessions and this machine's server), names the
  * environment after the box, and waits until it answers. Mirrors the archive install in
  * packages/ssh/src/tunnel.ts.
@@ -65,6 +65,17 @@ export const PROVISION_SCRIPT = String.raw`set -eu
 version=$1
 name=$2
 CODEZ_DIR=/var/asana-config/asana
+if [ "$version" = latest-nightly ]; then
+  version=$(curl -fsSL --connect-timeout 30 "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=20" | python3 -c '
+import json, sys
+for release in json.load(sys.stdin):
+    tag = release["tag_name"]
+    if "nightly" in tag and any(a["name"].endswith("-linux-x64.tar.gz") for a in release.get("assets", [])):
+        print(tag.lstrip("v"))
+        break
+')
+  [ -n "$version" ] || { echo "No nightly T3 release with a linux-x64 build found" >&2; exit 1; }
+fi
 dir="$HOME/.t3/runtime/versions/$version"
 if [ "$(cat "$dir/.install-complete" 2>/dev/null)" != "$version" ] || [ ! -x "$dir/t3" ]; then
   base=https://github.com/pingdotgg/t3code/releases/download/v$version
@@ -85,6 +96,7 @@ if [ "$(cat "$dir/.install-complete" 2>/dev/null)" != "$version" ] || [ ! -x "$d
   mv "$staging" "$dir"
   trap - EXIT
 fi
+ln -sfn "$dir" "$HOME/.t3/runtime/current"
 sudo -n hostnamectl set-hostname --pretty "$name" 2>/dev/null || true
 unit="$HOME/.config/systemd/user/t3code.service"
 mkdir -p "$(dirname "$unit")"
@@ -139,9 +151,9 @@ journalctl --user -u t3code.service -n 30 --no-pager >&2 || true
 exit 1
 `;
 
-/** Runs on the box as `sh -s -- <version>`: mints a short-lived pairing token. */
+/** Runs on the box as `sh -s -- <label>`: mints a short-lived pairing token. */
 export const PAIR_SCRIPT = String.raw`set -eu
-"$HOME/.t3/runtime/versions/$1/t3" pair --base-dir "$HOME/.t3" --ttl 5m --label "$2"
+"$HOME/.t3/runtime/current/t3" pair --base-dir "$HOME/.t3" --ttl 5m --label "$1"
 `;
 
 /**
