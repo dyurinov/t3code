@@ -386,21 +386,13 @@ const make = Effect.gen(function* () {
   const installCredentials = Effect.fn("DevboxService.installCredentials")(function* (
     record: DevboxRecord,
   ) {
-    // Top up an empty pool first: minting opens the browser, which approves a signed-in user.
-    for (const provider of ["claude", "codex"] as const) {
-      const free = yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 1));
-      if (free === 0)
-        yield* pool.mint(provider).pipe(
-          Effect.tapError((error) =>
-            Effect.logWarning("devbox login pool could not be topped up", {
-              provider,
-              error: error.message,
-            }),
-          ),
-          Effect.ignore,
-        );
-    }
-    const claim = yield* pool.claim(record.name).pipe(Effect.mapError(devboxError("provision")));
+    const needed = (["claude", "codex"] as const).filter(
+      (provider) => record.credentials[provider] !== "installed",
+    );
+    if (needed.length === 0) return record;
+    const claim = yield* pool
+      .claim(record.name, needed)
+      .pipe(Effect.mapError(devboxError("provision")));
     const payload = {
       claude: Option.getOrNull(claim.claude),
       codex: Option.getOrNull(claim.codex),
@@ -410,11 +402,16 @@ const make = Effect.gen(function* () {
       yield* ssh(record.name, `python3 -c ${shellQuote(INSTALL_CREDENTIALS_SCRIPT)}`, body);
       yield* claim.commit.pipe(Effect.mapError(devboxError("provision")));
     }
-    const state = (claimed: Option.Option<unknown>): DevboxCredentialState =>
-      Option.isSome(claimed) ? "installed" : "pool-empty";
+    const state = (
+      provider: "claude" | "codex",
+      claimed: Option.Option<unknown>,
+    ): DevboxCredentialState =>
+      record.credentials[provider] === "installed" || Option.isSome(claimed)
+        ? "installed"
+        : "pool-empty";
     const next = {
       ...record,
-      credentials: { claude: state(claim.claude), codex: state(claim.codex) },
+      credentials: { claude: state("claude", claim.claude), codex: state("codex", claim.codex) },
     };
     yield* putRecord(next);
     return next;
@@ -424,10 +421,7 @@ const make = Effect.gen(function* () {
   const connect = Effect.fn("DevboxService.connect")(function* (stored: DevboxRecord) {
     yield* coder(["ssh", "--wait=yes", stored.name, "--", "true"], "15 minutes");
     // A box whose creation stopped early, or that met an empty pool, still needs its logins.
-    const record =
-      stored.credentials.claude !== "installed" && stored.credentials.codex !== "installed"
-        ? yield* installCredentials(stored)
-        : stored;
+    const record = yield* installCredentials(stored);
     const version = yield* t3Version;
     yield* ssh(
       record.name,
@@ -685,6 +679,16 @@ const make = Effect.gen(function* () {
   const reconnect = Effect.gen(function* () {
     const all = yield* workspaces;
     for (const record of (yield* Ref.get(records)).values()) {
+      // A spare whose creation stopped before Coder made it would block every new spare.
+      if (record.spare === true && record.environmentId === null && !all.has(record.name)) {
+        yield* Ref.update(records, (current) => {
+          const next = new Map(current);
+          next.delete(record.name);
+          return next;
+        });
+        yield* save().pipe(Effect.ignore);
+        continue;
+      }
       if (all.get(record.name)?.latest_build.status !== "running") continue;
       yield* locks
         .withLock(record.name, connect(record))
@@ -707,6 +711,36 @@ const make = Effect.gen(function* () {
     Effect.catchCause((cause) => Effect.logWarning("devbox keep-awake failed", { cause })),
     Effect.repeat(Schedule.spaced(KEEP_ALIVE_INTERVAL)),
   );
+  // Keeps one sign-in of each provider waiting, and hands new ones to boxes that went without.
+  const topUpLogins = Effect.gen(function* () {
+    for (const provider of ["claude", "codex"] as const) {
+      const free = yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 1));
+      if (free === 0)
+        yield* pool.mint(provider).pipe(
+          Effect.tapError((error) =>
+            Effect.logWarning("devbox login could not be minted", {
+              provider,
+              error: error.message,
+            }),
+          ),
+          Effect.ignore,
+        );
+    }
+    const all = yield* workspaces;
+    for (const record of (yield* Ref.get(records)).values()) {
+      const missing =
+        record.credentials.claude !== "installed" || record.credentials.codex !== "installed";
+      if (!missing || all.get(record.name)?.latest_build.status !== "running") continue;
+      yield* locks
+        .withLock(record.name, installCredentials(record))
+        .pipe(Effect.catchCause((cause) => Effect.logWarning("devbox logins failed", { cause })));
+    }
+  }).pipe(
+    Effect.catchCause((cause) => Effect.logWarning("devbox login top-up failed", { cause })),
+    Effect.repeat(Schedule.spaced(Duration.minutes(5))),
+  );
+  // Minting opens browser tabs, so only the app that keeps spares does it.
+  if (spareCount > 0) yield* forkParked(topUpLogins);
   yield* forkParked(
     reconnect.pipe(
       Effect.catchCause((cause) => Effect.logWarning("devbox reconnect failed", { cause })),

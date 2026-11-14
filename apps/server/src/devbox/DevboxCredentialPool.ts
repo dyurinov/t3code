@@ -41,7 +41,11 @@ export interface DevboxCredentialClaim {
 export class DevboxCredentialPool extends Context.Service<
   DevboxCredentialPool,
   {
-    readonly claim: (box: string) => Effect.Effect<DevboxCredentialClaim, DevboxCredentialError>;
+    /** Picks one free login of each of `providers` for `box`. */
+    readonly claim: (
+      box: string,
+      providers: ReadonlyArray<DevboxCredentialProvider>,
+    ) => Effect.Effect<DevboxCredentialClaim, DevboxCredentialError>;
     /** Forgets the logins a deleted box held; they cannot be reused. */
     readonly release: (box: string) => Effect.Effect<void>;
     readonly freeCount: (
@@ -158,9 +162,9 @@ const make = Effect.gen(function* () {
   });
 
   const claim: DevboxCredentialPool["Service"]["claim"] = Effect.fn("DevboxCredentialPool.claim")(
-    function* (box) {
-      const claudeIds = yield* freeIds("claude");
-      const codexIds = yield* freeIds("codex");
+    function* (box, providers) {
+      const claudeIds = providers.includes("claude") ? yield* freeIds("claude") : [];
+      const codexIds = providers.includes("codex") ? yield* freeIds("codex") : [];
       let claudeId: string | undefined;
       let claude = Option.none<ClaudeLogin>();
       for (const id of claudeIds) {
@@ -193,8 +197,24 @@ const make = Effect.gen(function* () {
       { discard: true },
     ).pipe(Effect.ignore);
 
+  // Only finished sign-ins count; a login still waiting for its browser leaves a bare folder.
   const freeCount: DevboxCredentialPool["Service"]["freeCount"] = (provider) =>
-    freeIds(provider).pipe(Effect.map((ids) => ids.length));
+    freeIds(provider).pipe(
+      Effect.flatMap((ids) =>
+        Effect.filter(ids, (id) =>
+          fs
+            .exists(
+              path.join(
+                dir(provider, "free"),
+                id,
+                provider === "claude" ? ".claude.json" : "auth.json",
+              ),
+            )
+            .pipe(Effect.orElseSucceed(() => false)),
+        ),
+      ),
+      Effect.map((ids) => ids.length),
+    );
 
   const mint: DevboxCredentialPool["Service"]["mint"] = Effect.fn("DevboxCredentialPool.mint")(
     function* (provider) {
@@ -214,16 +234,20 @@ const make = Effect.gen(function* () {
               env: { CLAUDE_CONFIG_DIR: sessionDir },
             }
           : { args: [codexBin, "login"], env: { CODEX_HOME: sessionDir } };
+      const discard = fs.remove(sessionDir, { recursive: true, force: true }).pipe(Effect.ignore);
       const result = yield* runner
         .run({
           command: "python3",
           args: ["-c", PTY_RUNNER, ...login.args],
           cwd: sessionDir,
           env: login.env,
-          // A signed-in browser approves at once; anything slower needs the user, who is not here.
-          timeout: "3 minutes",
+          // Claude approves a signed-in browser at once; Codex may wait for one click.
+          timeout: "10 minutes",
         })
-        .pipe(Effect.mapError(fail(`The ${provider} login did not finish`)));
+        .pipe(
+          Effect.mapError(fail(`The ${provider} login did not finish`)),
+          Effect.onError(() => discard),
+        );
       const signedIn =
         provider === "claude"
           ? Option.isSome(yield* readClaude(id))
@@ -231,7 +255,7 @@ const make = Effect.gen(function* () {
               .exists(path.join(sessionDir, "auth.json"))
               .pipe(Effect.orElseSucceed(() => false));
       if (result.code !== 0 || !signedIn) {
-        yield* fs.remove(sessionDir, { recursive: true, force: true }).pipe(Effect.ignore);
+        yield* discard;
         return yield* new DevboxCredentialError({
           message: `The ${provider} login was not completed.`,
         });
