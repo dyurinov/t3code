@@ -59,8 +59,14 @@ import {
 import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { useAtomValue } from "@effect/atom-react";
 import { environmentCatalog } from "../../connection/catalog";
-import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
+import {
+  devboxEnvironment,
+  devboxForEnvironment,
+  devboxPreparingAtom,
+  useDevboxes,
+} from "../../state/devboxes";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { newMessageId, newThreadId } from "~/lib/utils";
@@ -370,6 +376,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
+  const devboxPreparing = useAtomValue(devboxPreparingAtom);
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
@@ -476,6 +483,16 @@ export function useComposerSend(input: ComposerSendInput) {
           ),
         }),
       });
+      return;
+    }
+    if (devboxPreparing) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: "The devbox is still getting ready",
+          description: "Your message stays here. Send it once Run on shows the devbox.",
+        }),
+      );
       return;
     }
     const sleepingDevbox = activeEnvironmentUnavailable

@@ -27,6 +27,7 @@ import {
   PeerLinkSummary,
 } from "./peerLink.ts";
 import {
+  DevboxClaimResult,
   DevboxClientPairing,
   DevboxCreateInput,
   DevboxDeleteInput,
@@ -539,6 +540,7 @@ export const WS_METHODS = {
   devboxesStop: "devboxes.stop",
   devboxesDelete: "devboxes.delete",
   devboxesPairClient: "devboxes.pairClient",
+  devboxesClaim: "devboxes.claim",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverCheckSecretSource: "server.checkSecretSource",
@@ -904,6 +906,11 @@ const WsDevboxesStopRpc = Rpc.make(WS_METHODS.devboxesStop, {
 const WsDevboxesDeleteRpc = Rpc.make(WS_METHODS.devboxesDelete, {
   payload: DevboxDeleteInput,
   success: DevboxDeleteResult,
+  error: devboxErrors,
+});
+const WsDevboxesClaimRpc = Rpc.make(WS_METHODS.devboxesClaim, {
+  payload: Schema.Struct({}),
+  success: DevboxClaimResult,
   error: devboxErrors,
 });
 const WsDevboxesPairClientRpc = Rpc.make(WS_METHODS.devboxesPairClient, {
@@ -2192,6 +2199,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsDevboxesStopRpc,
   WsDevboxesDeleteRpc,
   WsDevboxesPairClientRpc,
+  WsDevboxesClaimRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerCheckSecretSourceRpc,
   WsServerSearchAcpRegistryRpc,

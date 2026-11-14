@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   parseCoderList,
   parsePairingToken,
+  randomDevboxName,
   slugifyDevboxName,
   uniqueDevboxName,
 } from "./devboxScripts.ts";
@@ -32,6 +33,19 @@ describe("devbox names", () => {
     );
     const long = "dyurinov-a-very-long-task-descri";
     expect(uniqueDevboxName(long, new Set([long]))).toBe("dyurinov-a-very-long-task-desc-2");
+  });
+});
+
+describe("randomDevboxName", () => {
+  it("is two words, and avoids names Coder already has", () => {
+    let seed = 0;
+    const sequence = () => (seed++ % 2 === 0 ? 0 : 0.999);
+    const first = randomDevboxName(undefined, new Set(), sequence);
+    expect(first).toMatch(/^[a-z]+-[a-z]+$/u);
+    seed = 0;
+    const second = randomDevboxName(undefined, new Set([first]), sequence);
+    expect(second).not.toBe(first);
+    expect(randomDevboxName("dyurinov", new Set(), () => 0)).toMatch(/^dyurinov-[a-z]+-[a-z]+$/u);
   });
 });
 

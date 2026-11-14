@@ -192,3 +192,124 @@ try:
 except Exception:
     print(0)
 `;
+
+const NAME_ADJECTIVES = [
+  "amber",
+  "bold",
+  "brave",
+  "bright",
+  "calm",
+  "clever",
+  "cosmic",
+  "crisp",
+  "daring",
+  "eager",
+  "fancy",
+  "fluffy",
+  "gentle",
+  "giant",
+  "golden",
+  "happy",
+  "humble",
+  "jolly",
+  "keen",
+  "lively",
+  "lucky",
+  "mellow",
+  "misty",
+  "nimble",
+  "noble",
+  "polite",
+  "proud",
+  "quick",
+  "quiet",
+  "rapid",
+  "rusty",
+  "shiny",
+  "silent",
+  "smooth",
+  "snowy",
+  "solid",
+  "spicy",
+  "sunny",
+  "swift",
+  "tidy",
+  "vivid",
+  "witty",
+];
+const NAME_NOUNS = [
+  "badger",
+  "bison",
+  "cedar",
+  "comet",
+  "coral",
+  "crane",
+  "falcon",
+  "ferret",
+  "fjord",
+  "gecko",
+  "glacier",
+  "heron",
+  "hornet",
+  "iguana",
+  "jaguar",
+  "koala",
+  "lemur",
+  "lynx",
+  "maple",
+  "meadow",
+  "moose",
+  "narwhal",
+  "nebula",
+  "otter",
+  "owl",
+  "panda",
+  "pebble",
+  "pine",
+  "puffin",
+  "quokka",
+  "raven",
+  "river",
+  "salmon",
+  "sparrow",
+  "tapir",
+  "tiger",
+  "tundra",
+  "turtle",
+  "walrus",
+  "willow",
+  "yak",
+  "zebra",
+];
+
+/** Two random words, like Coder's own `kind-zebras`, unique among `taken`. */
+export function randomDevboxName(
+  prefix: string | undefined,
+  taken: ReadonlySet<string>,
+  random: () => number,
+): string {
+  const pick = (words: ReadonlyArray<string>) =>
+    words[Math.floor(random() * words.length)] ?? words[0]!;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const name = slugifyDevboxName(`${pick(NAME_ADJECTIVES)}-${pick(NAME_NOUNS)}`, prefix);
+    if (!taken.has(name)) return name;
+  }
+  return uniqueDevboxName(
+    slugifyDevboxName(`${pick(NAME_ADJECTIVES)}-${pick(NAME_NOUNS)}`, prefix),
+    taken,
+  );
+}
+
+/**
+ * `z devbox create` opens the Coder page and, when its token expired, an AWS SSO approval page.
+ * This takes the place of the browser: SSO pages open (a signed-in browser approves them at
+ * once), the Coder page does not.
+ */
+export const BROWSER_FILTER_SCRIPT = `#!/bin/sh
+for url in "$@"; do
+  case "$url" in
+    *coder.asana-sand.com*) ;;
+    *) open "$url" ;;
+  esac
+done
+`;

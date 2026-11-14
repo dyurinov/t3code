@@ -96,3 +96,9 @@ export const DevboxClientPairing = Schema.Struct({
   pairingCode: Schema.String,
 });
 export type DevboxClientPairing = typeof DevboxClientPairing.Type;
+
+export const DevboxClaimResult = Schema.Struct({
+  ...DevboxClientPairing.fields,
+  name: Schema.String,
+});
+export type DevboxClaimResult = typeof DevboxClaimResult.Type;

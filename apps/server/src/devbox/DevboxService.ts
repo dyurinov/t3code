@@ -24,6 +24,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
+import * as FiberSet from "effect/FiberSet";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -48,6 +49,8 @@ import {
   REMOTE_T3_PORT,
   parseCoderList,
   parsePairingToken,
+  randomDevboxName,
+  BROWSER_FILTER_SCRIPT,
   slugifyDevboxName,
   uniqueDevboxName,
   type CoderWorkspace,
@@ -63,6 +66,8 @@ const DevboxRecord = Schema.Struct({
     claude: Schema.Literals(["installed", "pool-empty", "not-installed"]),
     codex: Schema.Literals(["installed", "pool-empty", "not-installed"]),
   }),
+  /** Prepared ahead of time, waiting for `claim`. */
+  spare: Schema.optionalKey(Schema.Boolean),
 });
 type DevboxRecord = typeof DevboxRecord.Type;
 const DevboxFile = Schema.Struct({ devboxes: Schema.Array(DevboxRecord) });
@@ -93,6 +98,11 @@ export class DevboxService extends Context.Service<
       name: string,
       options: { readonly force: boolean },
     ) => Effect.Effect<void, DevboxError>;
+    /**
+     * Takes a prepared spare (or creates a box when there is none), wakes and links it, and
+     * returns a one-time code for this client. Starts preparing the next spare.
+     */
+    readonly claim: Effect.Effect<DevboxClientPairing & { readonly name: string }, DevboxError>;
     /** A one-time code for a client to connect to the box at its loopback URL. */
     readonly pairClient: (name: string) => Effect.Effect<DevboxClientPairing, DevboxError>;
     /** The devbox an environment id belongs to, if any. */
@@ -130,11 +140,18 @@ const make = Effect.gen(function* () {
     Effect.map(Option.getOrUndefined),
   );
   const pinnedT3Version = yield* Config.String("T3CODE_DEVBOX_T3_VERSION").pipe(Config.option);
+  // How many prepared boxes to keep waiting. Off unless set, so dev servers never create boxes.
+  const spareCount = yield* Config.Int("T3CODE_DEVBOX_SPARES").pipe(Config.withDefault(0));
+  const browserFilter = path.join(config.stateDir, "devbox-browser.sh");
+  yield* fs
+    .writeFileString(browserFilter, BROWSER_FILTER_SCRIPT, { mode: 0o755 })
+    .pipe(Effect.ignore);
   const records = yield* Ref.make<ReadonlyMap<string, DevboxRecord>>(new Map());
   const transient = yield* Ref.make<ReadonlyMap<string, Transient>>(new Map());
   const locks = yield* KeyedLock.make<string>();
   const tunnels = yield* FiberMap.make<string>();
   const creations = yield* FiberMap.make<string>();
+  const background = yield* FiberSet.make();
 
   const devboxError = (reason: DevboxError["reason"]) => (cause: unknown) =>
     new DevboxError({ reason, message: errorText(cause) });
@@ -194,8 +211,7 @@ const make = Effect.gen(function* () {
         ...(options?.stdin === undefined ? {} : { stdin: options.stdin }),
         ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
         timeout: options?.timeout ?? "2 minutes",
-        // `z` opens the Coder page and SSO in a browser; the user does not need either here.
-        env: { BROWSER: "true" },
+        env: { BROWSER: browserFilter },
       })
       .pipe(
         Effect.flatMap((result) =>
@@ -391,8 +407,13 @@ const make = Effect.gen(function* () {
   });
 
   /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
-  const connect = Effect.fn("DevboxService.connect")(function* (record: DevboxRecord) {
-    yield* coder(["ssh", "--wait=yes", record.name, "--", "true"], "15 minutes");
+  const connect = Effect.fn("DevboxService.connect")(function* (stored: DevboxRecord) {
+    yield* coder(["ssh", "--wait=yes", stored.name, "--", "true"], "15 minutes");
+    // A box whose creation stopped early still needs its logins.
+    const record =
+      stored.credentials.claude === "not-installed" && stored.credentials.codex === "not-installed"
+        ? yield* installCredentials(stored)
+        : stored;
     const version = yield* t3Version;
     yield* ssh(
       record.name,
@@ -425,11 +446,25 @@ const make = Effect.gen(function* () {
         `source admin/mac.bashrc >/dev/null 2>&1; exec asana2/asana/tools/zoe/bin/z ${args.map(shellQuote).join(" ")}`,
       ],
       { cwd: codezDir, timeout: CREATE_TIMEOUT },
-    ).pipe(Effect.mapError(devboxError("coder")));
+    ).pipe(
+      Effect.mapError(devboxError("coder")),
+      // z's later steps (SSO, commit-signing keys) can fail after the box itself is up.
+      Effect.catch((error) =>
+        workspaces.pipe(
+          Effect.flatMap((all) =>
+            all.has(record.name)
+              ? Effect.logWarning("z devbox create failed after creating the box", {
+                  name: record.name,
+                  error: error.message,
+                })
+              : Effect.fail(error),
+          ),
+        ),
+      ),
+    );
     yield* coder(["autoupdate", record.name, "always"]).pipe(Effect.ignore);
     yield* coder(["ssh", "--wait=yes", record.name, "--", "true"], "30 minutes");
-    const withCredentials = yield* installCredentials(record);
-    yield* connect(withCredentials);
+    yield* connect(record);
     yield* setTransient(record.name, undefined);
   });
 
@@ -440,38 +475,50 @@ const make = Effect.gen(function* () {
     return port;
   });
 
-  const create: DevboxService["Service"]["create"] = Effect.fn("DevboxService.create")(
-    function* (input) {
-      const requested =
-        input.name ?? input.task ?? `task-${(yield* Clock.currentTimeMillis).toString(36)}`;
-      const taken = new Set([...(yield* workspaces).keys(), ...(yield* Ref.get(records)).keys()]);
-      const name = uniqueDevboxName(slugifyDevboxName(requested, namePrefix), taken);
-      const record: DevboxRecord = {
-        name,
-        localPort: yield* nextPort,
-        environmentId: null,
-        task: input.task ?? null,
-        createdAt: DateTime.formatIso(yield* DateTime.now),
-        credentials: { claude: "not-installed", codex: "not-installed" },
-      };
-      yield* putRecord(record);
-      yield* setTransient(name, { state: "creating", lastError: null });
-      yield* FiberMap.run(
-        creations,
-        name,
-        locks
-          .withLock(name, provision(record, input.branch))
-          .pipe(
-            Effect.catchCause((cause) =>
-              setTransient(name, { state: "failed", lastError: errorText(cause) }).pipe(
-                Effect.andThen(Effect.logWarning("devbox create failed", { name, cause })),
-              ),
+  const startCreate = Effect.fn("DevboxService.startCreate")(function* (
+    input: DevboxCreateInput,
+    spare: boolean,
+  ) {
+    const taken = new Set([...(yield* workspaces).keys(), ...(yield* Ref.get(records)).keys()]);
+    const seed = yield* Clock.currentTimeMillis;
+    let state = seed;
+    // Cheap deterministic generator: names only need to differ, not be unpredictable.
+    const random = () => {
+      state = (state * 1103515245 + 12345) % 2147483648;
+      return state / 2147483648;
+    };
+    const name =
+      input.name !== undefined
+        ? uniqueDevboxName(slugifyDevboxName(input.name, namePrefix), taken)
+        : randomDevboxName(namePrefix, taken, random);
+    const record: DevboxRecord = {
+      name,
+      localPort: yield* nextPort,
+      environmentId: null,
+      task: input.task ?? null,
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+      credentials: { claude: "not-installed", codex: "not-installed" },
+      ...(spare ? { spare: true } : {}),
+    };
+    yield* putRecord(record);
+    yield* setTransient(name, { state: "creating", lastError: null });
+    yield* FiberMap.run(
+      creations,
+      name,
+      locks
+        .withLock(name, provision(record, input.branch))
+        .pipe(
+          Effect.catchCause((cause) =>
+            setTransient(name, { state: "failed", lastError: errorText(cause) }).pipe(
+              Effect.andThen(Effect.logWarning("devbox create failed", { name, cause })),
             ),
           ),
-      );
-      return yield* summaryOf(name);
-    },
-  );
+        ),
+    );
+    return yield* summaryOf(name);
+  });
+
+  const create: DevboxService["Service"]["create"] = (input) => startCreate(input, false);
 
   const awaitReady: DevboxService["Service"]["awaitReady"] = Effect.fn("DevboxService.awaitReady")(
     function* (name, timeout) {
@@ -574,6 +621,43 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const ensureSpares = Effect.gen(function* () {
+    if (spareCount <= 0) return;
+    const spares = [...(yield* Ref.get(records)).values()].filter(
+      (record) => record.spare === true,
+    );
+    for (let missing = spareCount - spares.length; missing > 0; missing--) {
+      yield* startCreate({}, true);
+    }
+  }).pipe(
+    Effect.catchCause((cause) => Effect.logWarning("devbox spare could not be started", { cause })),
+  );
+
+  const claim: DevboxService["Service"]["claim"] = Effect.gen(function* () {
+    const all = yield* workspaces;
+    const spares = [...(yield* Ref.get(records)).values()].filter(
+      (record) => record.spare === true,
+    );
+    // A linked running spare is ready now; a stopped one wakes in about 90 seconds.
+    const ranked = spares.toSorted(
+      (a, b) =>
+        Number(all.get(b.name)?.latest_build.status === "running") -
+          Number(all.get(a.name)?.latest_build.status === "running") ||
+        Number(b.environmentId !== null) - Number(a.environmentId !== null),
+    );
+    const picked = ranked[0];
+    const name = picked === undefined ? (yield* startCreate({}, false)).name : picked.name;
+    if (picked !== undefined) {
+      const { spare: _spare, ...claimed } = picked;
+      yield* putRecord(claimed);
+    }
+    yield* FiberSet.run(background, ensureSpares);
+    const settled = yield* awaitReady(name, CREATE_TIMEOUT);
+    if (settled.state !== "running" || settled.environmentId === null) yield* wake(name);
+    const pairing = yield* pairClient(name);
+    return { ...pairing, name };
+  }).pipe(Effect.withSpan("DevboxService.claim"));
+
   const byEnvironment: DevboxService["Service"]["byEnvironment"] = (environmentId) =>
     Ref.get(records).pipe(
       Effect.flatMap((current) => {
@@ -612,6 +696,7 @@ const make = Effect.gen(function* () {
   yield* forkParked(
     reconnect.pipe(
       Effect.catchCause((cause) => Effect.logWarning("devbox reconnect failed", { cause })),
+      Effect.andThen(ensureSpares),
       Effect.andThen(keepAwake),
     ),
   );
@@ -623,6 +708,7 @@ const make = Effect.gen(function* () {
     wake,
     stop,
     remove,
+    claim,
     pairClient,
     byEnvironment,
   });

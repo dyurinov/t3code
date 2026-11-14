@@ -45,6 +45,13 @@ export function createDevboxEnvironmentAtoms<R, E>(
       onSuccess: ({ environmentId }, registry) =>
         Effect.sync(() => registry.refresh(list({ environmentId, input: {} }))),
     }),
+    // Takes a prepared box: can take minutes when it has to wake or none is ready.
+    claim: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:devboxes:claim",
+      tag: WS_METHODS.devboxesClaim,
+      onSuccess: ({ environmentId }, registry) =>
+        Effect.sync(() => registry.refresh(list({ environmentId, input: {} }))),
+    }),
     pairClient: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:devboxes:pair-client",
       tag: WS_METHODS.devboxesPairClient,

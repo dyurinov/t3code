@@ -74,6 +74,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.devboxesStop]: "devboxes",
   [WS_METHODS.devboxesDelete]: "devboxes",
   [WS_METHODS.devboxesPairClient]: "devboxes",
+  [WS_METHODS.devboxesClaim]: "devboxes",
   [WS_METHODS.serverUpdateSettings]: "server",
   [WS_METHODS.serverSearchAcpRegistry]: "server",
   [WS_METHODS.serverPrepareAcpRegistryAgent]: "server",

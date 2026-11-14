@@ -44,8 +44,7 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
-import { NewDevboxDialog } from "./devbox/NewDevboxDialog";
-import { useDevboxes } from "../state/devboxes";
+import { useNewDevbox } from "./devbox/useNewDevbox";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -682,24 +681,11 @@ export const BranchToolbar = memo(function BranchToolbar({
   );
 
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
-  const [newDevboxOpen, setNewDevboxOpen] = useState(false);
-  const devboxesAvailable = useDevboxes().available;
+  const newDevbox = useNewDevbox((readyEnvironmentId) => onEnvironmentChange?.(readyEnvironmentId));
   const onNewDevbox =
-    devboxesAvailable && onEnvironmentChange !== undefined && !envLocked
-      ? () => setNewDevboxOpen(true)
+    newDevbox.available && onEnvironmentChange !== undefined && !envLocked
+      ? () => void newDevbox.start()
       : undefined;
-  const newDevboxDialog =
-    onNewDevbox === undefined ? null : (
-      <NewDevboxDialog
-        open={newDevboxOpen}
-        initialTask=""
-        onClose={() => setNewDevboxOpen(false)}
-        onReady={(readyEnvironmentId) => {
-          setNewDevboxOpen(false);
-          onEnvironmentChange?.(readyEnvironmentId);
-        }}
-      />
-    );
   const onAddToMachine = (targetEnvironmentId: EnvironmentId | null) =>
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
   // A project on one machine still gets the picker when it can be added to another.
@@ -722,7 +708,6 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (layout === "panel") {
     return (
       <div className="flex w-full flex-col" data-thread-panel-run-context>
-        {newDevboxDialog}
         {panelSection !== "branch" ? (
           <RunContextSelector
             displayMode="panel"
@@ -775,7 +760,6 @@ export const BranchToolbar = memo(function BranchToolbar({
       data-compact={labelsOverflow ? "" : undefined}
       className={cn("gap-1 text-xs font-normal text-foreground/70 dark:text-muted-foreground")}
     >
-      {newDevboxDialog}
       {showGitControls ? (
         <div className="contents @xl/composer-surface:hidden">
           <RunContextSelector
