@@ -10,6 +10,8 @@ export const devboxEnvironment = createDevboxEnvironmentAtoms(connectionAtomRunt
 /** Devboxes live on the primary environment, which creates them and keeps their forwards. */
 export function useDevboxes(): {
   readonly hostEnvironmentId: EnvironmentId | null;
+  /** Whether the host can manage devboxes: its list answered, which needs the Coder CLI. */
+  readonly available: boolean;
   readonly devboxes: ReadonlyArray<DevboxSummary>;
   readonly refresh: () => void;
 } {
@@ -21,6 +23,7 @@ export function useDevboxes(): {
   );
   return {
     hostEnvironmentId,
+    available: query.data !== null,
     devboxes: query.data?.devboxes ?? [],
     refresh: query.refresh,
   };

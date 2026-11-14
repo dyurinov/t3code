@@ -45,6 +45,7 @@ import {
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { NewDevboxDialog } from "./devbox/NewDevboxDialog";
+import { useDevboxes } from "../state/devboxes";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -682,8 +683,11 @@ export const BranchToolbar = memo(function BranchToolbar({
 
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
   const [newDevboxOpen, setNewDevboxOpen] = useState(false);
+  const devboxesAvailable = useDevboxes().available;
   const onNewDevbox =
-    onEnvironmentChange !== undefined && !envLocked ? () => setNewDevboxOpen(true) : undefined;
+    devboxesAvailable && onEnvironmentChange !== undefined && !envLocked
+      ? () => setNewDevboxOpen(true)
+      : undefined;
   const newDevboxDialog =
     onNewDevbox === undefined ? null : (
       <NewDevboxDialog
@@ -699,7 +703,9 @@ export const BranchToolbar = memo(function BranchToolbar({
   const onAddToMachine = (targetEnvironmentId: EnvironmentId | null) =>
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
   // A project on one machine still gets the picker when it can be added to another.
-  const hasMultipleEnvironments = (availableEnvironments?.length ?? 0) > 1 || addTargets.length > 0;
+  // A machine that can create devboxes always offers a second one to run on.
+  const hasMultipleEnvironments =
+    (availableEnvironments?.length ?? 0) > 1 || addTargets.length > 0 || onNewDevbox !== undefined;
   const showEnvironmentPicker = hasMultipleEnvironments && onEnvironmentChange !== undefined;
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
