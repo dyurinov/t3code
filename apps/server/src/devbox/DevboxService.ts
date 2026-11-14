@@ -423,9 +423,9 @@ const make = Effect.gen(function* () {
   /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
   const connect = Effect.fn("DevboxService.connect")(function* (stored: DevboxRecord) {
     yield* coder(["ssh", "--wait=yes", stored.name, "--", "true"], "15 minutes");
-    // A box whose creation stopped early still needs its logins.
+    // A box whose creation stopped early, or that met an empty pool, still needs its logins.
     const record =
-      stored.credentials.claude === "not-installed" && stored.credentials.codex === "not-installed"
+      stored.credentials.claude !== "installed" && stored.credentials.codex !== "installed"
         ? yield* installCredentials(stored)
         : stored;
     const version = yield* t3Version;
