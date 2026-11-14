@@ -38,8 +38,22 @@ export function devboxForEnvironment(
   return devboxes.find((devbox) => devbox.environmentId === environmentId) ?? null;
 }
 
-/** Set while this client takes a devbox and connects to it; the composer holds sends meanwhile. */
-export const devboxPreparingAtom = Atom.make(false).pipe(
+/**
+ * This client taking a devbox for the draft: preparing (the host claims and wakes a box),
+ * ready (paired; waiting for its project to load so the draft can move), then switched.
+ * `queuedSend` holds a send pressed meanwhile, made once the draft is on the box.
+ */
+export type DevboxClaimState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "preparing"; readonly queuedSend: boolean }
+  | {
+      readonly kind: "ready" | "switched";
+      readonly environmentId: EnvironmentId;
+      readonly name: string;
+      readonly queuedSend: boolean;
+    };
+
+export const devboxClaimAtom = Atom.make<DevboxClaimState>({ kind: "idle" }).pipe(
   Atom.keepAlive,
-  Atom.withLabel("devboxes:preparing"),
+  Atom.withLabel("devboxes:claim"),
 );

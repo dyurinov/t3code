@@ -20,6 +20,8 @@ import {
   memo,
   useImperativeHandle,
   useRef,
+  useEffect,
+  useEffectEvent,
   useState,
 } from "react";
 import { flushSync } from "react-dom";
@@ -44,7 +46,9 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
-import { useNewDevbox } from "./devbox/useNewDevbox";
+import { devboxClaimLabel, useNewDevbox } from "./devbox/useNewDevbox";
+import { devboxClaimAtom } from "../state/devboxes";
+import { useAtomSet } from "@effect/atom-react";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -681,11 +685,36 @@ export const BranchToolbar = memo(function BranchToolbar({
   );
 
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
-  const newDevbox = useNewDevbox((readyEnvironmentId) => onEnvironmentChange?.(readyEnvironmentId));
+  const newDevbox = useNewDevbox();
+  const setDevboxClaim = useAtomSet(devboxClaimAtom);
   const onNewDevbox =
     newDevbox.available && onEnvironmentChange !== undefined && !envLocked
       ? () => void newDevbox.start()
       : undefined;
+  const claim = newDevbox.state;
+  const claimedEnvironmentId = claim.kind === "ready" ? claim.environmentId : null;
+  // The box's project loads a moment after this client connects; the draft can move only then.
+  const claimedListed =
+    claimedEnvironmentId !== null &&
+    (availableEnvironments?.some((env) => env.environmentId === claimedEnvironmentId) ?? false);
+  const moveDraftToDevbox = useEffectEvent(
+    (target: EnvironmentId | null, listed: boolean, current: EnvironmentId) => {
+      if (claim.kind !== "ready" || target === null) return;
+      if (current === target) setDevboxClaim({ ...claim, kind: "switched" });
+      else if (listed) onEnvironmentChange?.(target);
+    },
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the draft once the claimed box's project arrives from the environment registry.
+  useEffect(() => {
+    moveDraftToDevbox(claimedEnvironmentId, claimedListed, environmentId);
+  }, [claimedEnvironmentId, claimedListed, environmentId]);
+  const claimLabel = devboxClaimLabel(claim);
+  const shownEnvironments =
+    claimLabel === null
+      ? availableEnvironments
+      : availableEnvironments?.map((env) =>
+          env.environmentId === environmentId ? { ...env, label: claimLabel } : env,
+        );
   const onAddToMachine = (targetEnvironmentId: EnvironmentId | null) =>
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
   // A project on one machine still gets the picker when it can be added to another.
@@ -718,7 +747,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             envLocked={envLocked}
             envModeLocked={envModeLocked}
             environmentId={environmentId}
-            availableEnvironments={availableEnvironments}
+            availableEnvironments={shownEnvironments}
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={activeEnvironmentOption !== null}
             onEnvironmentChange={onEnvironmentChange}
@@ -769,7 +798,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             envLocked={envLocked}
             envModeLocked={envModeLocked}
             environmentId={environmentId}
-            availableEnvironments={availableEnvironments}
+            availableEnvironments={shownEnvironments}
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={showEnvironmentIndicator}
             onEnvironmentChange={onEnvironmentChange}
@@ -800,7 +829,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 onAutoEnvironment={onAutoEnvironment}
                 envLocked={envLocked}
                 environmentId={environmentId}
-                availableEnvironments={availableEnvironments}
+                availableEnvironments={shownEnvironments ?? availableEnvironments}
                 {...(showEnvironmentPicker ? { onEnvironmentChange } : {})}
                 {...(addTargets.length > 0 ? { onAddToMachine: () => onAddToMachine(null) } : {})}
                 onNewDevbox={onNewDevbox}

@@ -386,6 +386,20 @@ const make = Effect.gen(function* () {
   const installCredentials = Effect.fn("DevboxService.installCredentials")(function* (
     record: DevboxRecord,
   ) {
+    // Top up an empty pool first: minting opens the browser, which approves a signed-in user.
+    for (const provider of ["claude", "codex"] as const) {
+      const free = yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 1));
+      if (free === 0)
+        yield* pool.mint(provider).pipe(
+          Effect.tapError((error) =>
+            Effect.logWarning("devbox login pool could not be topped up", {
+              provider,
+              error: error.message,
+            }),
+          ),
+          Effect.ignore,
+        );
+    }
     const claim = yield* pool.claim(record.name).pipe(Effect.mapError(devboxError("provision")));
     const payload = {
       claude: Option.getOrNull(claim.claude),

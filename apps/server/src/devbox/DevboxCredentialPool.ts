@@ -220,7 +220,8 @@ const make = Effect.gen(function* () {
           args: ["-c", PTY_RUNNER, ...login.args],
           cwd: sessionDir,
           env: login.env,
-          timeout: "10 minutes",
+          // A signed-in browser approves at once; anything slower needs the user, who is not here.
+          timeout: "3 minutes",
         })
         .pipe(Effect.mapError(fail(`The ${provider} login did not finish`)));
       const signedIn =

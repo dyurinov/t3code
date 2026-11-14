@@ -44,7 +44,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { createModelSelection } from "@t3tools/shared/model";
-import { type SetStateAction, useLayoutEffect, useRef } from "react";
+import { type SetStateAction, useEffect, useEffectEvent, useLayoutEffect, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   isAtomCommandInterrupted,
@@ -59,12 +59,12 @@ import {
 import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { useAtomValue } from "@effect/atom-react";
+import { useAtom } from "@effect/atom-react";
 import { environmentCatalog } from "../../connection/catalog";
 import {
   devboxEnvironment,
   devboxForEnvironment,
-  devboxPreparingAtom,
+  devboxClaimAtom,
   useDevboxes,
 } from "../../state/devboxes";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -376,7 +376,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
-  const devboxPreparing = useAtomValue(devboxPreparingAtom);
+  const [devboxClaim, setDevboxClaim] = useAtom(devboxClaimAtom);
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
@@ -485,12 +485,13 @@ export function useComposerSend(input: ComposerSendInput) {
       });
       return;
     }
-    if (devboxPreparing) {
+    if (devboxClaim.kind === "preparing" || devboxClaim.kind === "ready") {
+      setDevboxClaim({ ...devboxClaim, queuedSend: true });
       toastManager.add(
         stackedThreadToast({
           type: "info",
-          title: "The devbox is still getting ready",
-          description: "Your message stays here. Send it once Run on shows the devbox.",
+          title: "Queued for the devbox",
+          description: "It sends as soon as the devbox is ready.",
         }),
       );
       return;
@@ -1537,5 +1538,20 @@ export function useComposerSend(input: ComposerSendInput) {
     });
     if (ready) return onSendLatest(...args);
   };
+  // A send pressed while a devbox was being taken goes out once the draft is on it.
+  const finishDevboxClaim = useEffectEvent((kind: string, current: EnvironmentId) => {
+    if (kind !== "switched" || devboxClaim.kind !== "switched") return;
+    if (devboxClaim.environmentId !== current) return;
+    setDevboxClaim({ kind: "idle" });
+    toastManager.add(
+      stackedThreadToast({ type: "success", title: `Running on ${devboxClaim.name}` }),
+    );
+    if (devboxClaim.queuedSend) void onSendWithRouting();
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the draft moves to the box asynchronously, after its environment registers.
+  useEffect(() => {
+    finishDevboxClaim(devboxClaim.kind, environmentId);
+  }, [devboxClaim.kind, environmentId]);
+
   return { onSend: onSendWithRouting };
 }

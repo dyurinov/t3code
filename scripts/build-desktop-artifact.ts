@@ -2850,6 +2850,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           T3CODE_DISABLE_AUTO_UPDATE: "1",
           // Always keep one prepared devbox, so New devbox starts at once.
           T3CODE_DEVBOX_SPARES: "1",
+          // The codex on PATH is Asana's z wrapper, which needs a terminal's environment.
+          T3CODE_DEVBOX_CODEX_BIN: `${NodeOS.homedir()}/.local/codex/codex`,
         },
         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
