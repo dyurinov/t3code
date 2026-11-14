@@ -8,6 +8,7 @@ import * as NodeOS from "node:os";
 
 import {
   DevboxError,
+  EnvironmentId as EnvironmentIdSchema,
   type DevboxClientPairing,
   type DevboxCreateInput,
   type DevboxPendingLogin,
@@ -17,6 +18,7 @@ import {
   type EnvironmentId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import * as NetService from "@t3tools/shared/Net";
 import { waitForHttpReady } from "@t3tools/shared/httpReadiness";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -75,6 +77,11 @@ const DevboxFile = Schema.Struct({ devboxes: Schema.Array(DevboxRecord) });
 const decodeFile = Schema.decodeUnknownEffect(Schema.fromJsonString(DevboxFile));
 const encodeFile = Schema.encodeEffect(Schema.fromJsonString(DevboxFile));
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeDescriptor = Schema.decodeUnknownEffect(
+  Schema.Struct({ environmentId: EnvironmentIdSchema }),
+);
+const decodeDescriptorId = (value: unknown) =>
+  decodeDescriptor(value).pipe(Effect.map((descriptor) => descriptor.environmentId));
 
 interface Transient {
   readonly state: DevboxState;
@@ -136,6 +143,7 @@ const make = Effect.gen(function* () {
   const peerLinks = yield* PeerLinks.PeerLinks;
   const pool = yield* DevboxCredentialPool.DevboxCredentialPool;
   const httpClient = yield* HttpClient.HttpClient;
+  const net = yield* NetService.NetService;
 
   const storePath = path.join(config.stateDir, "devboxes.json");
   const codezDir = yield* Config.String("T3CODE_DEVBOX_CODEZ_DIR").pipe(
@@ -335,8 +343,26 @@ const make = Effect.gen(function* () {
       Effect.retry(Schedule.spaced("5 seconds")),
       Effect.ignore,
     );
+  // Only this box's own environment counts: another box (or T3) may hold the port.
+  const answersHere = (record: DevboxRecord) =>
+    record.environmentId === null
+      ? Effect.succeed(false)
+      : httpClient.get(`http://127.0.0.1:${record.localPort}/.well-known/t3/environment`).pipe(
+          Effect.flatMap((response) => response.json),
+          Effect.flatMap(decodeDescriptorId),
+          Effect.map((environmentId) => environmentId === record.environmentId),
+          Effect.timeout("3 seconds"),
+          Effect.orElseSucceed(() => false),
+        );
+  // A forward left over from a server that was killed keeps the port; reuse it instead of
+  // retrying a forward that can never bind.
   const startTunnel = (record: DevboxRecord) =>
-    FiberMap.run(tunnels, record.name, forward(record), { onlyIfMissing: true }).pipe(
+    answersHere(record).pipe(
+      Effect.flatMap((up) =>
+        up
+          ? Effect.void
+          : FiberMap.run(tunnels, record.name, forward(record), { onlyIfMissing: true }),
+      ),
       Effect.andThen(
         waitForHttpReady({
           baseUrl: `http://127.0.0.1:${record.localPort}`,
@@ -367,11 +393,25 @@ const make = Effect.gen(function* () {
   });
 
   const link = Effect.fn("DevboxService.link")(function* (record: DevboxRecord) {
+    const url = `http://127.0.0.1:${record.localPort}`;
     if (record.environmentId !== null) {
       const existing = yield* peerLinks
         .get(record.environmentId as EnvironmentId)
         .pipe(Effect.orElseSucceed(() => Option.none()));
-      if (Option.isSome(existing)) return record;
+      if (Option.isSome(existing) && existing.value.urls.includes(url)) return record;
+    }
+    // A link to this box at an older address (its port changed) blocks linking it here.
+    const answering = yield* httpClient.get(`${url}/.well-known/t3/environment`).pipe(
+      Effect.flatMap((response) => response.json),
+      Effect.flatMap(decodeDescriptorId),
+      Effect.option,
+    );
+    if (Option.isSome(answering)) {
+      const stale = yield* peerLinks
+        .get(answering.value)
+        .pipe(Effect.orElseSucceed(() => Option.none()));
+      if (Option.isSome(stale) && !stale.value.urls.includes(url))
+        yield* peerLinks.unlink(answering.value).pipe(Effect.ignore);
     }
     const label = (yield* environment.getDescriptor).label;
     const pairingCode = yield* mintPairingCode(record.name, label);
@@ -482,10 +522,11 @@ const make = Effect.gen(function* () {
     yield* setTransient(record.name, undefined);
   });
 
+  // Skips ports any process listens on, such as another T3 instance's devbox forwards.
   const nextPort = Effect.gen(function* () {
     const used = new Set([...(yield* Ref.get(records)).values()].map((record) => record.localPort));
     let port = PORT_BASE;
-    while (used.has(port)) port++;
+    while (used.has(port) || !(yield* net.canListenOnHost(port, "127.0.0.1"))) port++;
     return port;
   });
 

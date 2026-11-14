@@ -1539,6 +1539,16 @@ export function useComposerSend(input: ComposerSendInput) {
     });
     if (ready) return onSendLatest(...args);
   };
+  const sendLatest = useEffectEvent(() => onSendWithRouting());
+  // The draft has only just moved to the box, so the first try can still see the old machine's
+  // composer state and quietly do nothing. Retry briefly until the prompt has left the composer.
+  const sendQueuedDevboxMessage = async () => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      if (promptRef.current.trim().length === 0) return;
+      await sendLatest();
+    }
+  };
   // A send pressed while a devbox was being taken goes out once the draft is on it and one of
   // its providers is ready; a box's provider status arrives a moment after it connects.
   const devboxProviderReady = providerInstanceEntries.some(isProviderInstancePickerReady);
@@ -1551,7 +1561,7 @@ export function useComposerSend(input: ComposerSendInput) {
       toastManager.add(
         stackedThreadToast({ type: "success", title: `Running on ${devboxClaim.name}` }),
       );
-      if (devboxClaim.queuedSend) void onSendWithRouting();
+      if (devboxClaim.queuedSend) void sendQueuedDevboxMessage();
     },
   );
   const abandonQueuedDevboxSend = useEffectEvent(() => {
