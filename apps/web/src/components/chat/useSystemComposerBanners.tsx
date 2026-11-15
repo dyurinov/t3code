@@ -74,22 +74,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
-  const {
-    hostEnvironmentId: devboxHostId,
-    available: devboxesAvailable,
-    devboxes,
-    refresh: refreshDevboxes,
-  } = useDevboxes();
-  // Box states change on the host with nothing pushed; poll faster while one changes.
-  const devboxesBusy = devboxes.some(
-    (devbox) => devbox.state === "creating" || devbox.state === "starting",
-  );
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls host-side devbox state, which the server does not push.
-  useEffect(() => {
-    if (!devboxesAvailable) return;
-    const timer = setInterval(refreshDevboxes, devboxesBusy ? 4_000 : 20_000);
-    return () => clearInterval(timer);
-  }, [devboxesAvailable, devboxesBusy, refreshDevboxes]);
+  const { hostEnvironmentId: devboxHostId, devboxes, refresh: refreshDevboxes } = useDevboxes();
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const [wakingDevbox, setWakingDevbox] = useState(false);
   const unavailableDevbox = devboxForEnvironment(

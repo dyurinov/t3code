@@ -1,3 +1,4 @@
+import type { DevboxState } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 /** Coder workspace names: lowercase letters, digits and single hyphens, at most 32 characters. */
@@ -413,4 +414,17 @@ export function hoursWithin(spans: ReadonlyArray<TimeSpan>, since: number, until
   for (const [start, end] of spans)
     ms += Math.max(0, Math.min(end, until) - Math.max(start, since));
   return ms / 3_600_000;
+}
+
+/**
+ * What a box shows: an action in flight says what it is doing. A failure stays shown only while
+ * Coder agrees nothing moved; a box that came up anyway, or that someone started, shows as it is.
+ */
+export function shownDevboxState(
+  transient: DevboxState | undefined,
+  actual: DevboxState,
+): DevboxState {
+  if (transient === undefined) return actual;
+  if (transient !== "failed") return transient;
+  return actual === "stopped" || actual === "failed" || actual === "missing" ? "failed" : actual;
 }

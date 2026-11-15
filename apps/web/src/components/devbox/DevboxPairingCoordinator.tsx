@@ -25,7 +25,7 @@ const PROVIDER_RECHECK_DELAY_MS = 20_000;
  * loopback, so clients on another machine are skipped.
  */
 export function DevboxPairingCoordinator() {
-  const { hostEnvironmentId, devboxes } = useDevboxes();
+  const { hostEnvironmentId, available, devboxes, refresh } = useDevboxes();
   const onHost = useAtomValue(clientHostEnvironmentAtom(hostEnvironmentId));
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();
@@ -35,6 +35,22 @@ export function DevboxPairingCoordinator() {
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
+
+  // Box states change on the host (Coder auto-stop, a wake finishing) and nothing is pushed;
+  // follow a changing box closely and the rest at a calm pace.
+  const changing = devboxes.some(
+    (devbox) =>
+      devbox.state === "creating" ||
+      devbox.state === "starting" ||
+      devbox.state === "stopping" ||
+      devbox.state === "deleting",
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the host's devbox list, which the server does not push
+  useEffect(() => {
+    if (!available) return;
+    const timer = setInterval(refresh, changing ? 4_000 : 20_000);
+    return () => clearInterval(timer);
+  }, [available, changing, refresh]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pairs with servers outside React as the host reports them
   useEffect(() => {

@@ -62,6 +62,7 @@ import {
   devboxSpans,
   hoursWithin,
   nextDevboxNumber,
+  shownDevboxState,
   type TimeSpan,
   randomDevboxName,
   BROWSER_FILTER_SCRIPT,
@@ -371,7 +372,7 @@ const make = Effect.gen(function* () {
     current: Transient | undefined,
   ): DevboxSummary => ({
     name: record.name,
-    state: current?.state ?? coderState(workspace),
+    state: shownDevboxState(current?.state, coderState(workspace)),
     environmentId: record.environmentId as EnvironmentId | null,
     url: `http://127.0.0.1:${record.localPort}`,
     task: record.task,

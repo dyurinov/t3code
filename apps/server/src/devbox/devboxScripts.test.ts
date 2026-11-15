@@ -4,6 +4,7 @@ import {
   devboxSpans,
   hoursWithin,
   nextDevboxNumber,
+  shownDevboxState,
   parseCoderList,
   parsePairingToken,
   randomDevboxName,
@@ -132,5 +133,17 @@ describe("devboxSpans", () => {
     const spans = devboxSpans([build(2, "delete", 5, 6), build(1, "start", 1, 2)], hour(12));
     expect(spans.awake).toEqual([[hour(1), hour(6)]]);
     expect(spans.existed).toEqual([hour(1), hour(6)]);
+  });
+});
+
+describe("shownDevboxState", () => {
+  it.each([
+    [undefined, "stopped", "stopped"],
+    ["starting", "stopped", "starting"],
+    ["failed", "stopped", "failed"],
+    ["failed", "running", "running"],
+    ["failed", "starting", "starting"],
+  ] as const)("action %j with Coder %j shows %j", (transient, actual, shown) => {
+    expect(shownDevboxState(transient, actual)).toBe(shown);
   });
 });
