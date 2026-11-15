@@ -15,8 +15,15 @@ export function createDevboxEnvironmentAtoms<R, E>(
     // Listing asks Coder for every box's state; creating and waking poll it.
     staleTimeMs: 3_000,
   });
+  const usage = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:devboxes:usage",
+    tag: WS_METHODS.devboxesUsage,
+    // Reads every box's build history from Coder; spend moves slowly.
+    staleTimeMs: 60_000,
+  });
   return {
     list,
+    usage,
     create: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:devboxes:create",
       tag: WS_METHODS.devboxesCreate,

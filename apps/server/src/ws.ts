@@ -2676,6 +2676,7 @@ export const layerWsRpc = (
         [WS_METHODS.devboxesStartLogin]: ({ provider, count }) =>
           devboxes.startLogin(provider, count ?? 1),
         [WS_METHODS.devboxesCancelLogins]: ({ provider }) => devboxes.cancelLogins(provider),
+        [WS_METHODS.devboxesUsage]: (input) => devboxes.usage(input),
         [WS_METHODS.devboxesSubmitLoginCode]: ({ provider, code }) =>
           devboxes.submitLoginCode(provider, code),
         [WS_METHODS.serverGetSettings]: (_input) =>

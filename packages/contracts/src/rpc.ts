@@ -37,6 +37,8 @@ import {
   DevboxNameInput,
   DevboxStartLoginInput,
   DevboxCancelLoginsInput,
+  DevboxUsageInput,
+  DevboxUsageResult,
   DevboxLoginPool,
   DevboxSubmitLoginCodeInput,
   DevboxSummary,
@@ -548,6 +550,7 @@ export const WS_METHODS = {
   devboxesSubmitLoginCode: "devboxes.submitLoginCode",
   devboxesStartLogin: "devboxes.startLogin",
   devboxesCancelLogins: "devboxes.cancelLogins",
+  devboxesUsage: "devboxes.usage",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -929,6 +932,11 @@ const WsDevboxesStartLoginRpc = Rpc.make(WS_METHODS.devboxesStartLogin, {
 const WsDevboxesCancelLoginsRpc = Rpc.make(WS_METHODS.devboxesCancelLogins, {
   payload: DevboxCancelLoginsInput,
   success: DevboxLoginPool,
+  error: devboxErrors,
+});
+const WsDevboxesUsageRpc = Rpc.make(WS_METHODS.devboxesUsage, {
+  payload: DevboxUsageInput,
+  success: DevboxUsageResult,
   error: devboxErrors,
 });
 const WsDevboxesSubmitLoginCodeRpc = Rpc.make(WS_METHODS.devboxesSubmitLoginCode, {
@@ -2233,6 +2241,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsDevboxesSubmitLoginCodeRpc,
   WsDevboxesStartLoginRpc,
   WsDevboxesCancelLoginsRpc,
+  WsDevboxesUsageRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerCheckSecretSourceRpc,
   WsServerSearchAcpRegistryRpc,

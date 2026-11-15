@@ -1,7 +1,7 @@
 import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
 import { usesChatGptSharing } from "@t3tools/shared/usageLimits";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
-import { useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 import {
   USAGE_CONTRACT_VERSION,
@@ -10,7 +10,7 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import { CircleAlertIcon, ChevronDownIcon, InfoIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useContext, useEffect, useEffectEvent, useRef, useState } from "react";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
@@ -30,6 +30,8 @@ import {
 } from "@t3tools/shared/usageMerge";
 
 import { cn } from "../../lib/utils";
+import { devboxEnvironment, useDevboxes } from "../../state/devboxes";
+import { DevboxUsage, devboxUsageInput } from "./DevboxUsage";
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { resolveHour12 } from "../../timestampFormat";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
@@ -196,6 +198,9 @@ export function UsagePage() {
   }));
   const metric = preferences.metric;
   const showingLimits = metric === "limits";
+  const showingDevboxes = metric === "devboxes";
+  const registry = useContext(RegistryContext);
+  const { hostEnvironmentId: devboxHostId } = useDevboxes();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [limitsNow, setLimitsNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
@@ -296,6 +301,18 @@ export function UsagePage() {
   const refreshWindow = () => {
     if (refreshingRef.current) return;
 
+    if (showingDevboxes) {
+      const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
+      setWindowSelection({ days: windowDays, window: nextWindow });
+      if (devboxHostId !== null)
+        registry.refresh(
+          devboxEnvironment.usage({
+            environmentId: devboxHostId,
+            input: devboxUsageInput(nextWindow),
+          }),
+        );
+      return;
+    }
     if (showingLimits) {
       refreshingRef.current = true;
       setIsRefreshing(true);
@@ -362,28 +379,32 @@ export function UsagePage() {
         <WorkspaceBreadcrumbItem>
           <h1>Usage</h1>
         </WorkspaceBreadcrumbItem>
-        <WorkspaceBreadcrumbSeparator />
-        <WorkspaceBreadcrumbItem className="min-w-10 shrink">
-          <UsageEnvironmentFilter
-            environments={environments}
-            selectedEnvironments={selectedEnvironments}
-            selectedEnvironmentIds={selectedEnvironmentIds}
-            onSelectionChange={setSelectedEnvironmentIds}
-            showUsageStatus={!showingLimits}
-            refreshing={refreshingUsage}
-            isPartial={isPartial}
-            duplicateSources={merged.duplicateSources}
-            contractMismatches={merged.contractMismatches}
-            onOpenModelPrices={() => setPriceDialog({})}
-          />
-        </WorkspaceBreadcrumbItem>
-        <WorkspaceBreadcrumbSeparator />
-        <WorkspaceBreadcrumbItem current className="min-w-10">
-          <UsageProviderFilter
-            hiddenProviders={hiddenProviders}
-            onChange={(next) => updatePreferences({ hiddenProviders: next })}
-          />
-        </WorkspaceBreadcrumbItem>
+        {showingDevboxes ? null : (
+          <>
+            <WorkspaceBreadcrumbSeparator />
+            <WorkspaceBreadcrumbItem className="min-w-10 shrink">
+              <UsageEnvironmentFilter
+                environments={environments}
+                selectedEnvironments={selectedEnvironments}
+                selectedEnvironmentIds={selectedEnvironmentIds}
+                onSelectionChange={setSelectedEnvironmentIds}
+                showUsageStatus={!showingLimits}
+                refreshing={refreshingUsage}
+                isPartial={isPartial}
+                duplicateSources={merged.duplicateSources}
+                contractMismatches={merged.contractMismatches}
+                onOpenModelPrices={() => setPriceDialog({})}
+              />
+            </WorkspaceBreadcrumbItem>
+            <WorkspaceBreadcrumbSeparator />
+            <WorkspaceBreadcrumbItem current className="min-w-10">
+              <UsageProviderFilter
+                hiddenProviders={hiddenProviders}
+                onChange={(next) => updatePreferences({ hiddenProviders: next })}
+              />
+            </WorkspaceBreadcrumbItem>
+          </>
+        )}
       </WorkspaceBreadcrumb>
       {!showingLimits ? (
         <span className="hidden min-w-0 truncate text-xs text-muted-foreground @7xl/usage-header:block">
@@ -429,7 +450,7 @@ export function UsagePage() {
           onClick={refreshWindow}
           aria-label={showingLimits ? "Refresh limits" : "Refresh usage"}
           aria-busy={isRefreshing}
-          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
+          disabled={isRefreshing || (!showingLimits && !showingDevboxes && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -490,7 +511,7 @@ export function UsagePage() {
           onClick={refreshWindow}
           aria-label={showingLimits ? "Refresh limits" : "Refresh usage"}
           aria-busy={isRefreshing}
-          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
+          disabled={isRefreshing || (!showingLimits && !showingDevboxes && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -510,7 +531,9 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
-            {selectedEnvironments.length === 0 ? (
+            {showingDevboxes ? (
+              <DevboxUsage window={window} refreshing={isRefreshing} />
+            ) : selectedEnvironments.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {environments.length === 0
                   ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
@@ -552,7 +575,7 @@ export function UsagePage() {
           </WorkspacePageContainer>
         </ScrollArea>
       </div>
-      {showingLimits ? null : (
+      {showingLimits || showingDevboxes ? null : (
         <UsageModelDialogHost
           models={merged.models}
           environments={selectedEnvironments}

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  devboxSpans,
+  hoursWithin,
   nextDevboxNumber,
   parseCoderList,
   parsePairingToken,
@@ -89,5 +91,46 @@ describe("parsePairingToken", () => {
       "█▀▀▀▀▀█\nPairing URL: http://127.0.0.1:3773/pair#abc\nApp link: t3://x\nToken: abc123-XYZ\n";
     expect(parsePairingToken(stdout)).toBe("abc123-XYZ");
     expect(parsePairingToken("no token here")).toBeUndefined();
+  });
+});
+
+describe("devboxSpans", () => {
+  const at = (hour: number) => `2026-11-15T${String(hour).padStart(2, "0")}:00:00Z`;
+  const build = (
+    build_number: number,
+    transition: string,
+    created: number,
+    completed: number | null,
+    status = "succeeded",
+  ) => ({
+    build_number,
+    transition,
+    created_at: at(created),
+    job: { status, completed_at: completed === null ? null : at(completed) },
+  });
+  const hour = (value: number) => Date.parse(at(value));
+
+  it("runs from each start until its stop finishes, ignoring failed builds", () => {
+    const spans = devboxSpans(
+      [
+        build(4, "start", 10, null, "running"),
+        build(3, "stop", 6, 7),
+        build(2, "start", 3, 4, "failed"),
+        build(1, "start", 1, 2),
+      ],
+      hour(12),
+    );
+    expect(spans.awake).toEqual([
+      [hour(1), hour(7)],
+      [hour(10), hour(12)],
+    ]);
+    expect(spans.existed).toEqual([hour(1), hour(12)]);
+    expect(hoursWithin(spans.awake, hour(5), hour(11))).toBe(3);
+  });
+
+  it("ends a deleted box's life when its delete finishes", () => {
+    const spans = devboxSpans([build(2, "delete", 5, 6), build(1, "start", 1, 2)], hour(12));
+    expect(spans.awake).toEqual([[hour(1), hour(6)]]);
+    expect(spans.existed).toEqual([hour(1), hour(6)]);
   });
 });

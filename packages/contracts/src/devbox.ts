@@ -144,3 +144,33 @@ export const DevboxClaimResult = Schema.Struct({
   name: Schema.String,
 });
 export type DevboxClaimResult = typeof DevboxClaimResult.Type;
+
+export const DevboxUsageInput = Schema.Struct({
+  /** ISO time the window starts. */
+  since: Schema.String,
+  /** ISO time the window ends. */
+  until: Schema.String,
+});
+export type DevboxUsageInput = typeof DevboxUsageInput.Type;
+
+/** One box's time and estimated cost inside the window, from its Coder build history. */
+export const DevboxUsageEntry = Schema.Struct({
+  name: Schema.String,
+  /** Created and managed by T3; others are the user's own Coder boxes. */
+  managed: Schema.Boolean,
+  /** `null` once the box is deleted. */
+  state: Schema.NullOr(DevboxState),
+  awakeHours: Schema.Number,
+  asleepHours: Schema.Number,
+  cost: Schema.Number,
+});
+export type DevboxUsageEntry = typeof DevboxUsageEntry.Type;
+
+export const DevboxUsageResult = Schema.Struct({
+  boxes: Schema.Array(DevboxUsageEntry),
+  /** Dollars per hour a running box costs: instance, disk and public IP. */
+  awakeRate: Schema.Number,
+  /** Dollars per hour a stopped box costs: its disk. */
+  asleepRate: Schema.Number,
+});
+export type DevboxUsageResult = typeof DevboxUsageResult.Type;

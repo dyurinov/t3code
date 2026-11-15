@@ -16,6 +16,8 @@ import {
   type DevboxCredentialState,
   type DevboxState,
   type DevboxSummary,
+  type DevboxUsageInput,
+  type DevboxUsageResult,
   type EnvironmentId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -37,6 +39,7 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
 import * as ServerConfig from "../config.ts";
@@ -54,7 +57,11 @@ import {
   REMOTE_T3_PORT,
   parseCoderList,
   parsePairingToken,
+  CoderBuild,
+  devboxSpans,
+  hoursWithin,
   nextDevboxNumber,
+  type TimeSpan,
   randomDevboxName,
   BROWSER_FILTER_SCRIPT,
   slugifyDevboxName,
@@ -78,10 +85,29 @@ const DevboxRecord = Schema.Struct({
   provisioned: Schema.optionalKey(Schema.String),
 });
 type DevboxRecord = typeof DevboxRecord.Type;
+const Span = Schema.Tuple([Schema.Number, Schema.Number]);
+const DeletedDevbox = Schema.Struct({
+  name: Schema.String,
+  awake: Schema.Array(Span),
+  existed: Span,
+});
+type DeletedDevbox = typeof DeletedDevbox.Type;
+const decodeBuilds = Schema.decodeUnknownEffect(Schema.Array(CoderBuild));
+const decodeWhoami = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(Schema.Struct({ url: Schema.String }))),
+);
+
+// AWS list prices in eu-central-1, where the boxes run: r8i.4xlarge, 200 GiB gp3, one IPv4.
+const DISK_RATE = (200 * 0.0952) / 730;
+const AWAKE_RATE = 1.3406 + 0.005 + DISK_RATE;
+const USAGE_TOKEN_NAME = "t3-devbox-usage";
+
 const DevboxFile = Schema.Struct({
   devboxes: Schema.Array(DevboxRecord),
   /** The number the next box gets; numbers are never reused, even after a delete. */
   nextNumber: Schema.optionalKey(Schema.Number),
+  /** Deleted boxes' running and lifetime spans; Coder forgets a box's builds once it is gone. */
+  history: Schema.optionalKey(Schema.Array(DeletedDevbox)),
 });
 const decodeFile = Schema.decodeUnknownEffect(Schema.fromJsonString(DevboxFile));
 const encodeFile = Schema.encodeEffect(Schema.fromJsonString(DevboxFile));
@@ -140,6 +166,8 @@ export class DevboxService extends Context.Service<
     readonly claim: Effect.Effect<DevboxClientPairing & { readonly name: string }, DevboxError>;
     /** A one-time code for a client to connect to the box at its loopback URL. */
     readonly pairClient: (name: string) => Effect.Effect<DevboxClientPairing, DevboxError>;
+    /** Each box's running and stopped time inside the window, with an estimated cost. */
+    readonly usage: (input: DevboxUsageInput) => Effect.Effect<DevboxUsageResult, DevboxError>;
     /** The devbox an environment id belongs to, if any. */
     readonly byEnvironment: (
       environmentId: EnvironmentId,
@@ -184,6 +212,7 @@ const make = Effect.gen(function* () {
     .pipe(Effect.ignore);
   const records = yield* Ref.make<ReadonlyMap<string, DevboxRecord>>(new Map());
   const nextNumber = yield* Ref.make<number | undefined>(undefined);
+  const history = yield* Ref.make<ReadonlyArray<DeletedDevbox>>([]);
   const transient = yield* Ref.make<ReadonlyMap<string, Transient>>(new Map());
   const locks = yield* KeyedLock.make<string>();
   const tunnels = yield* FiberMap.make<string>();
@@ -207,9 +236,11 @@ const make = Effect.gen(function* () {
     function* () {
       const current = yield* Ref.get(records);
       const number = yield* Ref.get(nextNumber);
+      const deleted = yield* Ref.get(history);
       const text = `${yield* encodeFile({
         devboxes: [...current.values()],
         ...(number === undefined ? {} : { nextNumber: number }),
+        ...(deleted.length === 0 ? {} : { history: deleted }),
       })}\n`;
       yield* fs.writeFileString(`${storePath}.tmp`, text);
       yield* fs.rename(`${storePath}.tmp`, storePath);
@@ -741,7 +772,14 @@ const make = Effect.gen(function* () {
           yield* FiberMap.remove(tunnels, name);
           if (record.environmentId !== null)
             yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
-          if (workspace !== undefined) yield* coder(["delete", name, "--yes"], "15 minutes");
+          if (workspace !== undefined) {
+            yield* rememberDeleted(name).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("devbox usage could not be kept", { name, cause }),
+              ),
+            );
+            yield* coder(["delete", name, "--yes"], "15 minutes");
+          }
           yield* pool.release(name);
           yield* Ref.update(records, (current) => {
             const next = new Map(current);
@@ -880,6 +918,144 @@ const make = Effect.gen(function* () {
     yield* pool.submitCode(provider, code).pipe(Effect.mapError(devboxError("invalid")));
   });
 
+  // ── usage ────────────────────────────────────────────────────────────────
+  // A token of its own for Coder's REST API; the CLI keeps its session in the OS keychain.
+  const tokenPath = path.join(config.stateDir, "devbox-coder-token");
+  const coderUrl = yield* Effect.cached(
+    coder(["whoami", "--output", "json"], "1 minute").pipe(
+      Effect.flatMap(decodeWhoami),
+      Effect.flatMap((entries) =>
+        entries[0] === undefined
+          ? Effect.fail(new DevboxError({ reason: "coder", message: "Coder is not signed in." }))
+          : Effect.succeed(entries[0].url),
+      ),
+      Effect.mapError(devboxError("coder")),
+    ),
+  );
+  const mintToken = coder(["tokens", "rm", USAGE_TOKEN_NAME]).pipe(
+    Effect.ignore,
+    Effect.andThen(
+      coder(["tokens", "create", "--name", USAGE_TOKEN_NAME, "--lifetime", "720h"], "1 minute"),
+    ),
+    Effect.map((stdout) => stdout.trim().split("\n").at(-1)?.trim() ?? ""),
+    Effect.tap((token) =>
+      fs.writeFileString(tokenPath, token, { mode: 0o600 }).pipe(Effect.ignore),
+    ),
+  );
+  const coderGet = Effect.fn("DevboxService.coderGet")(function* (apiPath: string) {
+    const base = yield* coderUrl;
+    const send = (token: string) =>
+      httpClient
+        .execute(
+          HttpClientRequest.get(`${base}${apiPath}`).pipe(
+            HttpClientRequest.setHeader("Coder-Session-Token", token),
+          ),
+        )
+        .pipe(Effect.mapError(devboxError("coder")));
+    const stored = yield* fs.readFileString(tokenPath).pipe(Effect.orElseSucceed(() => ""));
+    let response = yield* send(stored.trim() || (yield* mintToken));
+    // Expired or revoked: make a new one once.
+    if (response.status === 401) response = yield* send(yield* mintToken);
+    if (response.status >= 400)
+      return yield* new DevboxError({
+        reason: "coder",
+        message: `Coder answered ${response.status} for ${apiPath}.`,
+      });
+    return yield* response.json.pipe(Effect.mapError(devboxError("coder")));
+  });
+  /** Newest first, back to the first build before `since` so the state at `since` is known. */
+  const buildsSince = Effect.fn("DevboxService.buildsSince")(function* (
+    workspaceId: string,
+    since: number,
+  ) {
+    const builds: Array<CoderBuild> = [];
+    for (let offset = 0; ; offset += 100) {
+      const page = yield* coderGet(
+        `/api/v2/workspaces/${workspaceId}/builds?limit=100&offset=${offset}`,
+      ).pipe(Effect.flatMap(decodeBuilds), Effect.mapError(devboxError("coder")));
+      builds.push(...page);
+      if (page.length < 100 || page.some((build) => Date.parse(build.created_at) < since)) break;
+    }
+    return builds;
+  });
+  const entryOf = (
+    name: string,
+    managed: boolean,
+    state: DevboxUsageResult["boxes"][number]["state"],
+    awake: ReadonlyArray<TimeSpan>,
+    existed: TimeSpan | null,
+    since: number,
+    until: number,
+  ) => {
+    const awakeHours = hoursWithin(awake, since, until);
+    const existedHours = existed === null ? 0 : hoursWithin([existed], since, until);
+    const asleepHours = Math.max(0, existedHours - awakeHours);
+    return {
+      name,
+      managed,
+      state,
+      awakeHours,
+      asleepHours,
+      cost: awakeHours * AWAKE_RATE + asleepHours * DISK_RATE,
+    };
+  };
+  const usage: DevboxService["Service"]["usage"] = Effect.fn("DevboxService.usage")(
+    function* (input) {
+      const since = Date.parse(input.since);
+      const until = Date.parse(input.until);
+      const now = yield* Clock.currentTimeMillis;
+      const current = yield* Ref.get(records);
+      const all = [...(yield* workspaces).values()];
+      const live = yield* Effect.forEach(
+        all.flatMap((workspace) =>
+          workspace.id === undefined ? [] : [{ ...workspace, id: workspace.id }],
+        ),
+        (workspace) =>
+          buildsSince(workspace.id, since).pipe(
+            Effect.map((builds) => {
+              const spans = devboxSpans(builds, now);
+              const record = current.get(workspace.name);
+              return entryOf(
+                workspace.name,
+                record !== undefined,
+                record === undefined
+                  ? coderState(workspace)
+                  : summarize(record, workspace, undefined).state,
+                spans.awake,
+                spans.existed,
+                since,
+                until,
+              );
+            }),
+          ),
+        { concurrency: 4 },
+      );
+      const gone = (yield* Ref.get(history)).map((box) =>
+        entryOf(box.name, true, null, box.awake, box.existed, since, until),
+      );
+      return {
+        boxes: [...live, ...gone]
+          .filter((entry) => entry.awakeHours + entry.asleepHours > 0)
+          .toSorted((a, b) => b.cost - a.cost),
+        awakeRate: AWAKE_RATE,
+        asleepRate: DISK_RATE,
+      };
+    },
+  );
+  /** Keeps a box's spans before Coder forgets them with the box. */
+  const rememberDeleted = Effect.fn("DevboxService.rememberDeleted")(function* (name: string) {
+    const workspace = (yield* workspaces).get(name);
+    if (workspace?.id === undefined) return;
+    const builds = yield* buildsSince(workspace.id, 0);
+    const spans = devboxSpans(builds, yield* Clock.currentTimeMillis);
+    if (spans.existed === null) return;
+    const existed = spans.existed;
+    yield* Ref.update(history, (current) => [
+      ...current.filter((box) => box.name !== name),
+      { name, awake: spans.awake, existed },
+    ]);
+  });
+
   const byEnvironment: DevboxService["Service"]["byEnvironment"] = (environmentId) =>
     Ref.get(records).pipe(
       Effect.flatMap((current) => {
@@ -892,6 +1068,7 @@ const make = Effect.gen(function* () {
   const stored = yield* load;
   yield* Ref.set(records, new Map(stored.devboxes.map((record) => [record.name, record])));
   yield* Ref.set(nextNumber, stored.nextNumber);
+  yield* Ref.set(history, stored.history ?? []);
   const reconnect = Effect.gen(function* () {
     const all = yield* workspaces;
     const ordered = [...(yield* Ref.get(records)).values()].toSorted(
@@ -985,6 +1162,7 @@ const make = Effect.gen(function* () {
     remove,
     claim,
     pairClient,
+    usage,
     byEnvironment,
   });
 });

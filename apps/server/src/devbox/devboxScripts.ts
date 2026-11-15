@@ -60,7 +60,9 @@ export function uniqueDevboxName(name: string, taken: ReadonlySet<string>): stri
 }
 
 const CoderWorkspace = Schema.Struct({
+  id: Schema.optional(Schema.String),
   name: Schema.String,
+  created_at: Schema.optional(Schema.String),
   latest_build: Schema.Struct({
     status: Schema.String,
     deadline: Schema.optional(Schema.NullOr(Schema.String)),
@@ -355,3 +357,60 @@ export const PROVISION_REVISION = (() => {
   }
   return hash.toString(16);
 })();
+
+/** A Coder workspace build, as `/api/v2/workspaces/{id}/builds` returns it (newest first). */
+export const CoderBuild = Schema.Struct({
+  build_number: Schema.Number,
+  transition: Schema.String,
+  created_at: Schema.String,
+  job: Schema.Struct({
+    status: Schema.String,
+    completed_at: Schema.optional(Schema.NullOr(Schema.String)),
+  }),
+});
+export type CoderBuild = typeof CoderBuild.Type;
+
+/** `[start, end]` in epoch ms. */
+export type TimeSpan = readonly [number, number];
+
+/**
+ * When a box ran and when it existed, from its builds. A start counts from when it was asked
+ * for, a stop or delete until it finished: the instance bills for both. Failed builds change
+ * nothing.
+ */
+export function devboxSpans(
+  builds: ReadonlyArray<CoderBuild>,
+  now: number,
+): { readonly awake: ReadonlyArray<TimeSpan>; readonly existed: TimeSpan | null } {
+  const ordered = builds
+    .filter((build) => build.job.status !== "failed" && build.job.status !== "canceled")
+    .toSorted((a, b) => a.build_number - b.build_number);
+  const awake: Array<TimeSpan> = [];
+  let awakeSince: number | null = null;
+  let deletedAt: number | null = null;
+  for (const build of ordered) {
+    const startedAt = Date.parse(build.created_at);
+    const finishedAt = build.job.completed_at ? Date.parse(build.job.completed_at) : now;
+    if (build.transition === "start") {
+      awakeSince ??= startedAt;
+      continue;
+    }
+    if (awakeSince !== null) awake.push([awakeSince, finishedAt]);
+    awakeSince = null;
+    if (build.transition === "delete") deletedAt = finishedAt;
+  }
+  if (awakeSince !== null) awake.push([awakeSince, now]);
+  const first = ordered[0];
+  return {
+    awake,
+    existed: first === undefined ? null : [Date.parse(first.created_at), deletedAt ?? now],
+  };
+}
+
+/** Hours of `spans` inside `[since, until]`. */
+export function hoursWithin(spans: ReadonlyArray<TimeSpan>, since: number, until: number): number {
+  let ms = 0;
+  for (const [start, end] of spans)
+    ms += Math.max(0, Math.min(end, until) - Math.max(start, since));
+  return ms / 3_600_000;
+}
