@@ -27,6 +27,7 @@ import { useEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { accessConfig } from "../auth/ConnectAgentSurface";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
+import { DevboxBadge } from "../devbox/DevboxBadge";
 import { DevboxWakeButton } from "../devbox/DevboxWakeButton";
 import { Button } from "../ui/button";
 import {
@@ -184,6 +185,7 @@ function LinkedEnvironmentRow({
               pingClassName={null}
             />
             <h3 className="text-sm font-medium text-foreground">{link.label}</h3>
+            {devbox !== null ? <DevboxBadge /> : null}
           </div>
           <p className="text-xs text-muted-foreground">
             {accessConfig[link.access].label} · {status}

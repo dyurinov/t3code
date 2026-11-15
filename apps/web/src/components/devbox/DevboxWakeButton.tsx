@@ -3,6 +3,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { DevboxSummary } from "@t3tools/contracts";
+import { PowerIcon } from "lucide-react";
 import { useEffect } from "react";
 
 import { devboxEnvironment, useDevboxes } from "../../state/devboxes";
@@ -41,8 +42,9 @@ export function DevboxWakeButton({ devbox }: { readonly devbox: DevboxSummary })
     }
   };
   return (
-    <Button size="xs" onClick={() => void onWake()}>
-      {devbox.state === "failed" ? "Try again" : "Wake devbox"}
+    <Button size="xs" variant="outline" onClick={() => void onWake()}>
+      <PowerIcon aria-hidden />
+      {devbox.state === "failed" ? "Try again" : "Wake"}
     </Button>
   );
 }

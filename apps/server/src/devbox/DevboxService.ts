@@ -11,7 +11,8 @@ import {
   EnvironmentId as EnvironmentIdSchema,
   type DevboxClientPairing,
   type DevboxCreateInput,
-  type DevboxPendingLogin,
+  type DevboxLoginPool,
+  type DevboxLoginProvider,
   type DevboxCredentialState,
   type DevboxState,
   type DevboxSummary,
@@ -91,6 +92,11 @@ const decodeDescriptor = Schema.decodeUnknownEffect(
 const decodeDescriptorId = (value: unknown) =>
   decodeDescriptor(value).pipe(Effect.map((descriptor) => descriptor.environmentId));
 
+interface LoginQueue {
+  readonly queued: number;
+  readonly lastError: string | null;
+}
+
 interface Transient {
   readonly state: DevboxState;
   readonly lastError: string | null;
@@ -100,11 +106,15 @@ export class DevboxService extends Context.Service<
   DevboxService,
   {
     readonly list: Effect.Effect<ReadonlyArray<DevboxSummary>, DevboxError>;
-    readonly pendingLogins: Effect.Effect<ReadonlyArray<DevboxPendingLogin>>;
-    /** Starts one sign-in for `provider` (unless one waits) and returns where to approve it. */
-    readonly startLogin: (provider: "claude" | "codex") => Effect.Effect<string, DevboxError>;
-    /** Providers some devbox has no sign-in for while the pool holds none to give it. */
-    readonly missingLogins: Effect.Effect<ReadonlyArray<"claude" | "codex">>;
+    /** Each provider's pool of sign-ins for new boxes. */
+    readonly pools: Effect.Effect<ReadonlyArray<DevboxLoginPool>>;
+    /** Queues `count` sign-ins for `provider`; they run one at a time, each waiting for approval. */
+    readonly startLogin: (
+      provider: DevboxLoginProvider,
+      count: number,
+    ) => Effect.Effect<DevboxLoginPool>;
+    /** Drops the queued sign-ins and stops the one waiting for approval. */
+    readonly cancelLogins: (provider: DevboxLoginProvider) => Effect.Effect<DevboxLoginPool>;
     readonly submitLoginCode: (
       provider: "claude" | "codex",
       code: string,
@@ -179,6 +189,11 @@ const make = Effect.gen(function* () {
   const tunnels = yield* FiberMap.make<string>();
   const creations = yield* FiberMap.make<string>();
   const background = yield* FiberSet.make();
+  const loginWorkers = yield* FiberMap.make<DevboxLoginProvider>();
+  const loginQueues = yield* Ref.make<Record<DevboxLoginProvider, LoginQueue>>({
+    claude: { queued: 0, lastError: null },
+    codex: { queued: 0, lastError: null },
+  });
 
   const devboxError = (reason: DevboxError["reason"]) => (cause: unknown) =>
     new DevboxError({ reason, message: errorText(cause) });
@@ -792,7 +807,7 @@ const make = Effect.gen(function* () {
   }).pipe(Effect.withSpan("DevboxService.claim"));
 
   // Hands pooled sign-ins to running boxes without them. Sign-ins are minted only
-  // when the user asks (`startLogin`), so no browser window opens on its own.
+  // when the user queues them (`startLogin`), so no browser window opens on its own.
   const distributeLogins = Effect.gen(function* () {
     const all = yield* workspaces;
     // Boxes in use first: someone is waiting on them; spares get the next sign-in.
@@ -812,44 +827,51 @@ const make = Effect.gen(function* () {
       Effect.logWarning("devbox logins could not be handed out", { cause }),
     ),
   );
-  const pendingUrl = (provider: "claude" | "codex") =>
-    pool.pendingLogins.pipe(
-      Effect.map((logins) => logins.find((login) => login.provider === provider)?.url),
-    );
+  const poolOf = Effect.fn("DevboxService.poolOf")(function* (provider: DevboxLoginProvider) {
+    const pending = yield* pool.pendingLogins;
+    const queue = (yield* Ref.get(loginQueues))[provider];
+    return {
+      provider,
+      free: yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 0)),
+      inUse: yield* pool.assignedCount(provider),
+      queued: queue.queued,
+      pendingUrl: pending.find((login) => login.provider === provider)?.url ?? null,
+      lastError: queue.lastError,
+    } satisfies DevboxLoginPool;
+  });
+  const pools: DevboxService["Service"]["pools"] = Effect.forEach(
+    ["claude", "codex"] as const,
+    (provider) => poolOf(provider),
+  );
+  const setQueue = (provider: DevboxLoginProvider, change: (queue: LoginQueue) => LoginQueue) =>
+    Ref.update(loginQueues, (current) => ({ ...current, [provider]: change(current[provider]) }));
+  // One sign-in at a time per provider: each waits for its own browser approval.
+  const loginWorker = Effect.fn("DevboxService.loginWorker")(function* (
+    provider: DevboxLoginProvider,
+  ) {
+    while ((yield* Ref.get(loginQueues))[provider].queued > 0) {
+      const minted = yield* pool.mint(provider).pipe(Effect.result);
+      if (minted._tag === "Failure") {
+        yield* setQueue(provider, () => ({ queued: 0, lastError: minted.failure.message }));
+        return;
+      }
+      yield* setQueue(provider, (queue) => ({ ...queue, queued: Math.max(0, queue.queued - 1) }));
+      yield* FiberSet.run(background, distributeLogins);
+    }
+  });
   const startLogin: DevboxService["Service"]["startLogin"] = Effect.fn("DevboxService.startLogin")(
-    function* (provider) {
-      const waiting = yield* pendingUrl(provider);
-      if (waiting !== undefined) return waiting;
-      yield* FiberSet.run(
-        background,
-        pool.mint(provider).pipe(Effect.andThen(distributeLogins), Effect.ignore),
-      );
-      // The CLI prints its approval link within a few seconds of starting.
-      const url = yield* pendingUrl(provider).pipe(
-        Effect.repeat({
-          schedule: Schedule.spaced("500 millis"),
-          until: (found) => found !== undefined,
-        }),
-        Effect.timeoutOption("20 seconds"),
-        Effect.map(Option.flatMap(Option.fromUndefinedOr)),
-      );
-      if (Option.isNone(url))
-        return yield* new DevboxError({
-          reason: "provision",
-          message: `The ${provider} sign-in did not start.`,
-        });
-      return url.value;
+    function* (provider, count) {
+      yield* setQueue(provider, (queue) => ({ queued: queue.queued + count, lastError: null }));
+      yield* FiberMap.run(loginWorkers, provider, loginWorker(provider), { onlyIfMissing: true });
+      return yield* poolOf(provider);
     },
   );
-  const missingLogins: DevboxService["Service"]["missingLogins"] = Effect.gen(function* () {
-    const current = [...(yield* Ref.get(records)).values()];
-    const missing: Array<"claude" | "codex"> = [];
-    for (const provider of ["claude", "codex"] as const) {
-      if (!current.some((record) => record.credentials[provider] !== "installed")) continue;
-      const free = yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 0));
-      if (free === 0) missing.push(provider);
-    }
-    return missing;
+  const cancelLogins: DevboxService["Service"]["cancelLogins"] = Effect.fn(
+    "DevboxService.cancelLogins",
+  )(function* (provider) {
+    yield* setQueue(provider, () => ({ queued: 0, lastError: null }));
+    yield* FiberMap.remove(loginWorkers, provider);
+    return yield* poolOf(provider);
   });
 
   const submitLoginCode: DevboxService["Service"]["submitLoginCode"] = Effect.fn(
@@ -952,9 +974,9 @@ const make = Effect.gen(function* () {
 
   return DevboxService.of({
     list,
-    pendingLogins: pool.pendingLogins,
+    pools,
     startLogin,
-    missingLogins,
+    cancelLogins,
     submitLoginCode,
     create,
     awaitReady,

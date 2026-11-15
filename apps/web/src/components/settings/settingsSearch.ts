@@ -34,6 +34,7 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/worktrees"
   | "/settings/connections"
+  | "/settings/devboxes"
   | "/settings/access"
   | "/settings/secrets"
   | "/settings/maintenance"
@@ -109,6 +110,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": msg("Source control"),
   "/settings/worktrees": msg("Worktrees"),
   "/settings/connections": msg("Environments"),
+  "/settings/devboxes": msg("Devboxes"),
   "/settings/access": msg("Sharing & access"),
   "/settings/secrets": msg("Secrets"),
   "/settings/maintenance": msg("Maintenance"),
@@ -155,6 +157,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
     heading: msg("Connections"),
     paths: [
       "/settings/connections",
+      "/settings/devboxes",
       "/settings/access",
       ...(isSecretsFeatureEnabled ? (["/settings/secrets"] as const) : []),
     ],
@@ -1011,6 +1014,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/scheduled-tasks",
   },
   {
+    id: "devbox-sign-in-pool",
+    title: "Sign-in pool",
+    to: "/settings/devboxes",
+    searchTerms: ["devbox coder claude codex login account batch add approve"],
+  },
+  {
     id: "agent-browser-access",
     title: "Agent browser access",
     to: "/settings/browser",
@@ -1392,6 +1401,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/source-control": "environment-defaults",
   "/settings/worktrees": "project-defaults",
   "/settings/connections": "connections",
+  "/settings/devboxes": null,
   "/settings/access": "connections",
   "/settings/secrets": null,
   "/settings/scheduled-tasks": null,

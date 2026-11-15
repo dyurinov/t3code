@@ -85,34 +85,48 @@ export const DevboxDeleteInput = Schema.Struct({
 });
 export type DevboxDeleteInput = typeof DevboxDeleteInput.Type;
 
-export const DevboxPendingLogin = Schema.Struct({
-  provider: Schema.Literals(["claude", "codex"]),
-  /** Where the user approves the sign-in. */
-  url: Schema.String,
+export const DevboxLoginProvider = Schema.Literals(["claude", "codex"]);
+export type DevboxLoginProvider = typeof DevboxLoginProvider.Type;
+
+/** One provider's pool of pre-made sign-ins: each new devbox takes one. */
+export const DevboxLoginPool = Schema.Struct({
+  provider: DevboxLoginProvider,
+  /** Signed in and waiting for a box. */
+  free: Schema.Number,
+  /** Handed to boxes that still exist. */
+  inUse: Schema.Number,
+  /** Sign-ins asked for and not yet started; they run one at a time. */
+  queued: Schema.Number,
+  /** Where the user approves the sign-in running now, once its CLI printed the link. */
+  pendingUrl: Schema.NullOr(Schema.String),
+  /** Why the last sign-in failed; cleared by the next request. */
+  lastError: Schema.NullOr(Schema.String),
 });
-export type DevboxPendingLogin = typeof DevboxPendingLogin.Type;
+export type DevboxLoginPool = typeof DevboxLoginPool.Type;
 
 export const DevboxSubmitLoginCodeInput = Schema.Struct({
-  provider: Schema.Literals(["claude", "codex"]),
+  provider: DevboxLoginProvider,
   code: TrimmedNonEmptyString,
 });
 export type DevboxSubmitLoginCodeInput = typeof DevboxSubmitLoginCodeInput.Type;
 
 export const DevboxListResult = Schema.Struct({
   devboxes: Schema.Array(DevboxSummary),
-  /** Sign-ins for new devboxes that wait for the user's approval. */
-  pendingLogins: Schema.Array(DevboxPendingLogin),
-  /** Providers a devbox has no sign-in for; `devboxes.startLogin` starts one. */
-  missingLogins: Schema.Array(Schema.Literals(["claude", "codex"])),
+  pools: Schema.Array(DevboxLoginPool),
 });
+export type DevboxListResult = typeof DevboxListResult.Type;
 
 export const DevboxStartLoginInput = Schema.Struct({
-  provider: Schema.Literals(["claude", "codex"]),
+  provider: DevboxLoginProvider,
+  /** How many sign-ins to add to the pool; they run one after another. */
+  count: Schema.optionalKey(
+    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(20)),
+  ),
 });
 export type DevboxStartLoginInput = typeof DevboxStartLoginInput.Type;
-export const DevboxStartLoginResult = Schema.Struct({ url: Schema.String });
-export type DevboxStartLoginResult = typeof DevboxStartLoginResult.Type;
-export type DevboxListResult = typeof DevboxListResult.Type;
+
+export const DevboxCancelLoginsInput = Schema.Struct({ provider: DevboxLoginProvider });
+export type DevboxCancelLoginsInput = typeof DevboxCancelLoginsInput.Type;
 
 export const DevboxDeleteResult = Schema.Struct({ name: Schema.String, deleted: Schema.Boolean });
 export type DevboxDeleteResult = typeof DevboxDeleteResult.Type;

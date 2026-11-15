@@ -1,5 +1,5 @@
 import { createDevboxEnvironmentAtoms } from "@t3tools/client-runtime/state/devboxes";
-import type { DevboxPendingLogin, DevboxSummary, EnvironmentId } from "@t3tools/contracts";
+import type { DevboxLoginPool, DevboxSummary, EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -14,9 +14,7 @@ export function useDevboxes(): {
   /** Whether the host can manage devboxes: its list answered, which needs the Coder CLI. */
   readonly available: boolean;
   readonly devboxes: ReadonlyArray<DevboxSummary>;
-  readonly pendingLogins: ReadonlyArray<DevboxPendingLogin>;
-  /** Providers a devbox needs a sign-in for, waiting or not yet started. */
-  readonly logins: ReadonlyArray<DevboxLogin>;
+  readonly pools: ReadonlyArray<DevboxLoginPool>;
   readonly refresh: () => void;
 } {
   const hostEnvironmentId = usePrimaryEnvironmentId();
@@ -29,25 +27,9 @@ export function useDevboxes(): {
     hostEnvironmentId,
     available: query.data !== null,
     devboxes: query.data?.devboxes ?? [],
-    pendingLogins: query.data?.pendingLogins ?? [],
-    logins: devboxLogins(query.data?.pendingLogins ?? [], query.data?.missingLogins ?? []),
+    pools: query.data?.pools ?? [],
     refresh: query.refresh,
   };
-}
-
-export interface DevboxLogin {
-  readonly provider: "claude" | "codex";
-  readonly url: string | null;
-}
-
-function devboxLogins(
-  pending: ReadonlyArray<DevboxPendingLogin>,
-  missing: ReadonlyArray<"claude" | "codex">,
-): ReadonlyArray<DevboxLogin> {
-  return (["claude", "codex"] as const).flatMap((provider) => {
-    const url = pending.find((login) => login.provider === provider)?.url ?? null;
-    return url !== null || missing.includes(provider) ? [{ provider, url }] : [];
-  });
 }
 
 export function devboxForEnvironment(

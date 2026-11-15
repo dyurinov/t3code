@@ -36,7 +36,8 @@ import {
   DevboxListResult,
   DevboxNameInput,
   DevboxStartLoginInput,
-  DevboxStartLoginResult,
+  DevboxCancelLoginsInput,
+  DevboxLoginPool,
   DevboxSubmitLoginCodeInput,
   DevboxSummary,
 } from "./devbox.ts";
@@ -546,6 +547,7 @@ export const WS_METHODS = {
   devboxesClaim: "devboxes.claim",
   devboxesSubmitLoginCode: "devboxes.submitLoginCode",
   devboxesStartLogin: "devboxes.startLogin",
+  devboxesCancelLogins: "devboxes.cancelLogins",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -921,7 +923,12 @@ const WsDevboxesClaimRpc = Rpc.make(WS_METHODS.devboxesClaim, {
 });
 const WsDevboxesStartLoginRpc = Rpc.make(WS_METHODS.devboxesStartLogin, {
   payload: DevboxStartLoginInput,
-  success: DevboxStartLoginResult,
+  success: DevboxLoginPool,
+  error: devboxErrors,
+});
+const WsDevboxesCancelLoginsRpc = Rpc.make(WS_METHODS.devboxesCancelLogins, {
+  payload: DevboxCancelLoginsInput,
+  success: DevboxLoginPool,
   error: devboxErrors,
 });
 const WsDevboxesSubmitLoginCodeRpc = Rpc.make(WS_METHODS.devboxesSubmitLoginCode, {
@@ -2225,6 +2232,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsDevboxesClaimRpc,
   WsDevboxesSubmitLoginCodeRpc,
   WsDevboxesStartLoginRpc,
+  WsDevboxesCancelLoginsRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerCheckSecretSourceRpc,
   WsServerSearchAcpRegistryRpc,

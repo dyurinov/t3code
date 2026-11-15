@@ -51,6 +51,8 @@ export class DevboxCredentialPool extends Context.Service<
     readonly freeCount: (
       provider: DevboxCredentialProvider,
     ) => Effect.Effect<number, DevboxCredentialError>;
+    /** Logins handed to boxes that have not been deleted. */
+    readonly assignedCount: (provider: DevboxCredentialProvider) => Effect.Effect<number>;
     /**
      * Signs in one new pool session. Opens the browser on this machine and waits for the user
      * to approve it.
@@ -281,6 +283,12 @@ const make = Effect.gen(function* () {
       Effect.map((ids) => ids.length),
     );
 
+  const assignedCount: DevboxCredentialPool["Service"]["assignedCount"] = (provider) =>
+    fs.readDirectory(dir(provider, "assigned")).pipe(
+      Effect.map((entries) => entries.length),
+      Effect.orElseSucceed(() => 0),
+    );
+
   const mint: DevboxCredentialPool["Service"]["mint"] = Effect.fn("DevboxCredentialPool.mint")(
     function* (provider) {
       const free = dir(provider, "free");
@@ -320,7 +328,8 @@ const make = Effect.gen(function* () {
         })
         .pipe(
           Effect.mapError(fail(`The ${provider} login did not finish`)),
-          Effect.onError(() => discard),
+          // Also on interrupt: a cancelled sign-in must not leave a half-made session behind.
+          Effect.onExit((exit) => (exit._tag === "Success" ? Effect.void : discard)),
           Effect.ensuring(
             Effect.sync(() => {
               pending.delete(provider);
@@ -365,6 +374,7 @@ const make = Effect.gen(function* () {
     claim,
     release,
     freeCount,
+    assignedCount,
     mint,
     submitCode,
     pendingLogins,

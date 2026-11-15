@@ -1,71 +1,55 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { DevboxLoginProvider, EnvironmentId } from "@t3tools/contracts";
 import { useState } from "react";
 
 import { readLocalApi } from "../../localApi";
-import { type DevboxLogin, devboxEnvironment } from "../../state/devboxes";
+import { devboxEnvironment } from "../../state/devboxes";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /**
- * Approve starts a sign-in when none waits, then opens the provider's page. Claude's page then shows a code, which goes
- * back to the waiting sign-in from here; Codex finishes in the browser by itself.
+ * Approve opens the running sign-in's page. Claude's page then shows a code, which goes back to
+ * the sign-in from here; Codex finishes in the browser by itself. Key it by `url` so the next
+ * sign-in in a batch starts fresh.
  */
 export function DevboxLoginActions({
-  login,
+  provider,
+  url,
   hostEnvironmentId,
 }: {
-  readonly login: DevboxLogin;
+  readonly provider: DevboxLoginProvider;
+  readonly url: string;
   readonly hostEnvironmentId: EnvironmentId;
 }) {
   const submit = useAtomCommand(devboxEnvironment.submitLoginCode, { reportFailure: false });
-  const start = useAtomCommand(devboxEnvironment.startLogin, { reportFailure: false });
   const [opened, setOpened] = useState(false);
-  const [starting, setStarting] = useState(false);
   const [code, setCode] = useState("");
   const [sending, setSending] = useState(false);
 
-  const approve = async () => {
-    let url = login.url;
-    if (url === null) {
-      setStarting(true);
-      const result = await start({
-        environmentId: hostEnvironmentId,
-        input: { provider: login.provider },
-      });
-      setStarting(false);
-      if (result._tag === "Failure") {
-        toastManager.add(
-          stackedThreadToast({ type: "error", title: "The sign-in could not start" }),
-        );
-        return;
-      }
-      url = result.value.url;
-    }
+  const approve = () => {
     setOpened(true);
     void readLocalApi()?.shell.openExternal(url);
   };
 
-  if (!opened || login.provider === "codex") {
+  if (!opened || provider === "codex") {
     return (
-      <Button size="xs" disabled={starting} onClick={() => void approve()}>
-        {starting ? "Starting sign-in…" : "Approve"}
+      <Button size="xs" onClick={approve}>
+        {opened ? "Open again" : "Approve"}
       </Button>
     );
   }
   const send = async () => {
     setSending(true);
-    const result = await submit({
-      environmentId: hostEnvironmentId,
-      input: { provider: login.provider, code },
-    });
+    const result = await submit({ environmentId: hostEnvironmentId, input: { provider, code } });
     setSending(false);
     if (result._tag === "Failure") {
       toastManager.add(
         stackedThreadToast({ type: "error", title: "The sign-in did not take that code" }),
       );
+      return;
     }
+    setCode("");
   };
   return (
     <form
@@ -76,7 +60,7 @@ export function DevboxLoginActions({
       }}
     >
       <Input
-        id={`devbox-login-code-${login.provider}`}
+        id={`devbox-login-code-${provider}`}
         size="sm"
         className="w-56"
         placeholder="Paste the code from the page"

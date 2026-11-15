@@ -8,8 +8,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { KeyRoundIcon, WifiOffIcon } from "lucide-react";
-import { DevboxLoginActions } from "../devbox/DevboxLoginActions";
+import { WifiOffIcon } from "lucide-react";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { environmentCatalog } from "../../connection/catalog";
 import { ConnectionDiagnosisHeadline } from "../settings/ConnectionDiagnosisDetails";
@@ -26,12 +25,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { ServerUpdateAction, serverUpdateStageLabel } from "../ServerUpdateAction";
 import { useAutoBalanceUpdateBanner } from "./useAutoBalanceUpdateBanner";
-import {
-  devboxClaimAtom,
-  devboxEnvironment,
-  devboxForEnvironment,
-  useDevboxes,
-} from "../../state/devboxes";
+import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
 import { ComposerServerUpdateIcon } from "./ComposerServerUpdateStatus";
 import {
   dismissServerUpdateFailure,
@@ -84,21 +78,18 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     hostEnvironmentId: devboxHostId,
     available: devboxesAvailable,
     devboxes,
-    pendingLogins,
-    logins: devboxLogins,
     refresh: refreshDevboxes,
   } = useDevboxes();
-  // Sign-ins and box states change on the host with nothing pushed; poll faster while one waits.
-  const devboxesBusy =
-    pendingLogins.length > 0 ||
-    devboxes.some((devbox) => devbox.state === "creating" || devbox.state === "starting");
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls host-side devbox and sign-in state, which the server does not push.
+  // Box states change on the host with nothing pushed; poll faster while one changes.
+  const devboxesBusy = devboxes.some(
+    (devbox) => devbox.state === "creating" || devbox.state === "starting",
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls host-side devbox state, which the server does not push.
   useEffect(() => {
     if (!devboxesAvailable) return;
     const timer = setInterval(refreshDevboxes, devboxesBusy ? 4_000 : 20_000);
     return () => clearInterval(timer);
   }, [devboxesAvailable, devboxesBusy, refreshDevboxes]);
-  const devboxClaiming = useAtomValue(devboxClaimAtom).kind !== "idle";
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const [wakingDevbox, setWakingDevbox] = useState(false);
   const unavailableDevbox = devboxForEnvironment(
@@ -321,33 +312,6 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
             {unavailableDevbox === null ? disconnectAction : null}
           </>
         ),
-      });
-    }
-    // On a draft that needs it: one on a box without the sign-in, one taking a box, or one
-    // already started. Spares alone wait for the next claim instead of nagging every draft.
-    const draftDevbox = devboxForEnvironment(devboxes, activeThreadEnvironmentId);
-    const neededLogins = devboxLogins.filter(
-      (login) =>
-        login.url !== null ||
-        devboxClaiming ||
-        (draftDevbox !== null && draftDevbox.credentials[login.provider] !== "installed"),
-    );
-    for (const login of input.isDraft ? neededLogins : []) {
-      const providerName = login.provider === "codex" ? "Codex" : "Claude";
-      items.push({
-        id: `devbox-login:${login.provider}`,
-        variant: "warning",
-        group: "environment",
-        icon: <KeyRoundIcon />,
-        title: `${providerName} needs one sign-in for your devboxes`,
-        description:
-          login.provider === "claude"
-            ? "Approve, then paste the code here."
-            : "Approve it in the browser so new devboxes come signed in to Codex.",
-        actions:
-          devboxHostId === null ? undefined : (
-            <DevboxLoginActions login={login} hostEnvironmentId={devboxHostId} />
-          ),
       });
     }
     // An available update is offered by the sidebar's update pill; the composer only shows one

@@ -37,6 +37,7 @@ import {
 import { usePreparedConnection } from "~/state/session";
 import { EnvironmentRow, environmentTransportLabel } from "./EnvironmentRow";
 import { DevboxMenuItems } from "../devbox/DevboxMenuItems";
+import { DevboxBadge } from "../devbox/DevboxBadge";
 import { DevboxWakeButton } from "../devbox/DevboxWakeButton";
 import { devboxForEnvironment, devboxStatusLabel, useDevboxes } from "../../state/devboxes";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
@@ -245,6 +246,7 @@ export function SavedBackendListRow({
     <EnvironmentRow
       kind={machineKind}
       label={environment.label}
+      badge={devbox !== null ? <DevboxBadge /> : undefined}
       dimmed={!enabled}
       subtitle={
         <span className="flex min-w-0 items-center gap-1">
