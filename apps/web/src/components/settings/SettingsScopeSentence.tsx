@@ -54,6 +54,8 @@ export const SETTINGS_DEVICE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/settings/diffs",
   "/settings/snap-shot",
   "/settings/connections",
+  // Devboxes live on this machine's own server.
+  "/settings/devboxes",
   // Access picks its environment on the page itself.
   "/settings/access",
   "/settings/about",

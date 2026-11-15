@@ -38,6 +38,7 @@ import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
@@ -932,6 +933,7 @@ const make = Effect.gen(function* () {
       Effect.mapError(devboxError("coder")),
     ),
   );
+  const tokenLock = yield* Semaphore.make(1);
   const mintToken = coder(["tokens", "rm", USAGE_TOKEN_NAME]).pipe(
     Effect.ignore,
     Effect.andThen(
@@ -952,10 +954,23 @@ const make = Effect.gen(function* () {
           ),
         )
         .pipe(Effect.mapError(devboxError("coder")));
-    const stored = yield* fs.readFileString(tokenPath).pipe(Effect.orElseSucceed(() => ""));
-    let response = yield* send(stored.trim() || (yield* mintToken));
+    const readToken = fs.readFileString(tokenPath).pipe(
+      Effect.map((text) => text.trim()),
+      Effect.orElseSucceed(() => ""),
+    );
+    // Box histories load in parallel; one caller makes the token, the rest reuse it.
+    const tokenOtherThan = (rejected: string) =>
+      tokenLock.withPermit(
+        readToken.pipe(
+          Effect.flatMap((token) =>
+            token !== "" && token !== rejected ? Effect.succeed(token) : mintToken,
+          ),
+        ),
+      );
+    const first = yield* tokenOtherThan("");
+    let response = yield* send(first);
     // Expired or revoked: make a new one once.
-    if (response.status === 401) response = yield* send(yield* mintToken);
+    if (response.status === 401) response = yield* send(yield* tokenOtherThan(first));
     if (response.status >= 400)
       return yield* new DevboxError({
         reason: "coder",
