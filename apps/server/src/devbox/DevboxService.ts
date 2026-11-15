@@ -962,8 +962,9 @@ const make = Effect.gen(function* () {
     const tokenOtherThan = (rejected: string) =>
       tokenLock.withPermit(
         readToken.pipe(
-          Effect.flatMap((token) =>
-            token !== "" && token !== rejected ? Effect.succeed(token) : mintToken,
+          Effect.filterOrElse(
+            (token) => token !== "" && token !== rejected,
+            () => mintToken,
           ),
         ),
       );
