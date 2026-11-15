@@ -444,6 +444,35 @@ export function useComposerSend(input: ComposerSendInput) {
         }),
       );
     };
+    // Before the thread checks: a box asleep since this page loaded never sent its thread here.
+    const sleepingDevbox = activeEnvironmentUnavailable
+      ? devboxForEnvironment(devboxes, environmentId)
+      : null;
+    if (
+      sleepingDevbox !== null &&
+      sleepingDevbox.state !== "running" &&
+      devboxHostId !== null &&
+      !directAnnotation
+    ) {
+      // Wake it and hold the message: it goes out once the box is back and a provider is ready.
+      if (sleepingDevbox.environmentId !== null) {
+        setDevboxClaim({
+          kind: "switched",
+          environmentId: sleepingDevbox.environmentId,
+          name: sleepingDevbox.name,
+          queuedSend: true,
+        });
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: `Waking ${sleepingDevbox.name}`,
+          description: "Your message sends when it is back, in about 2 minutes.",
+        }),
+      );
+      void wakeDevbox({ environmentId: devboxHostId, input: { name: sleepingDevbox.name } });
+      return;
+    }
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
       !activeThread ||
@@ -493,29 +522,6 @@ export function useComposerSend(input: ComposerSendInput) {
           description: "It sends as soon as the devbox is ready.",
         }),
       );
-      return;
-    }
-    const sleepingDevbox = activeEnvironmentUnavailable
-      ? devboxForEnvironment(devboxes, environmentId)
-      : null;
-    if (sleepingDevbox !== null && sleepingDevbox.state !== "running" && devboxHostId !== null) {
-      // Wake it and hold the message: it goes out once the box is back and a provider is ready.
-      if (sleepingDevbox.environmentId !== null) {
-        setDevboxClaim({
-          kind: "switched",
-          environmentId: sleepingDevbox.environmentId,
-          name: sleepingDevbox.name,
-          queuedSend: true,
-        });
-      }
-      toastManager.add(
-        stackedThreadToast({
-          type: "info",
-          title: `Waking ${sleepingDevbox.name}`,
-          description: "Your message sends when it is back, in about 2 minutes.",
-        }),
-      );
-      void wakeDevbox({ environmentId: devboxHostId, input: { name: sleepingDevbox.name } });
       return;
     }
     if (activeEnvironmentUnavailable) {
@@ -1547,7 +1553,7 @@ export function useComposerSend(input: ComposerSendInput) {
   // The draft has only just moved to the box, so the first try can still see the old machine's
   // composer state and quietly do nothing. Retry briefly until the prompt has left the composer.
   const sendQueuedDevboxMessage = async () => {
-    for (let attempt = 0; attempt < 6; attempt++) {
+    for (let attempt = 0; attempt < 15; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       if (promptRef.current.trim().length === 0) return;
       await sendLatest();
@@ -1555,7 +1561,9 @@ export function useComposerSend(input: ComposerSendInput) {
   };
   // A send pressed while a devbox was being taken goes out once the draft is on it and one of
   // its providers is ready; a box's provider status arrives a moment after it connects.
-  const devboxProviderReady = providerInstanceEntries.some(isProviderInstancePickerReady);
+  // A box that slept this session still lists its providers as ready until it reconnects.
+  const devboxProviderReady =
+    !activeEnvironmentUnavailable && providerInstanceEntries.some(isProviderInstancePickerReady);
   const finishDevboxClaim = useEffectEvent(
     (kind: string, current: EnvironmentId, ready: boolean) => {
       if (kind !== "switched" || devboxClaim.kind !== "switched") return;
