@@ -11,7 +11,7 @@ import {
 } from "./runtimeModeConfig";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
-import { useDevboxAsleep } from "../../state/devboxes";
+import { devboxForEnvironment, useDevboxAsleep, useDevboxes } from "../../state/devboxes";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { importPastedComposerText, readPastedComposerContext } from "../composerInlineTokenPaste";
 import {
@@ -1849,6 +1849,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // A compact footer gives the dictation capsule the whole row beside the send button.
   const dictationTakesFooter = isComposerFooterCompact && speechInput.state.phase !== "idle";
   const devboxAsleep = useDevboxAsleep(environmentId);
+  const isDevboxEnvironment = devboxForEnvironment(useDevboxes().devboxes, environmentId) !== null;
   const submissionTarget = activePendingProgress ? "pending-user-input" : "provider-turn";
   const submissionBlocked = isComposerSubmissionBlocked({
     submissionTarget,
@@ -2468,6 +2469,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       showProviderUnavailable={showProviderUnavailable}
       providerSetupInstanceId={providerSetupInstanceId}
       onOpenProviderSetup={onOpenProviderSetup}
+      onOpenDevboxSignIns={
+        isDevboxEnvironment ? () => void navigate({ to: "/settings/devboxes" }) : undefined
+      }
       providerCatalogPending={providerCatalogPending}
       isSendBusy={isSendBusy}
       multipleModelsEnabled={routeKind === "draft" && supportsMultipleModels}

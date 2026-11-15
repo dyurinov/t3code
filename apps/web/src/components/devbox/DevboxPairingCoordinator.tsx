@@ -14,6 +14,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 const attempted = new Set<EnvironmentId>();
 // Boxes seen down; their provider status is from boot and gets checked again once they answer.
 const woken = new Set<EnvironmentId>();
+// Each box's sign-in states as last seen, to notice the host installing one.
+const credentialsSeen = new Map<EnvironmentId, string>();
 // A box just up is still running its startup script, which can starve the provider probe.
 const PROVIDER_RECHECK_DELAY_MS = 20_000;
 
@@ -73,6 +75,21 @@ export function DevboxPairingCoordinator() {
       );
     }
   }, [devboxes, environments, refreshProviders]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a sign-in the host just installed on a box shows there only after its server re-probes providers
+  useEffect(() => {
+    for (const devbox of devboxes) {
+      if (devbox.environmentId === null) continue;
+      const signature = `${devbox.credentials.claude}:${devbox.credentials.codex}`;
+      const previous = credentialsSeen.get(devbox.environmentId);
+      credentialsSeen.set(devbox.environmentId, signature);
+      if (previous === undefined || previous === signature) continue;
+      void refreshProviders({
+        environmentId: devbox.environmentId,
+        input: { refreshModels: true },
+      });
+    }
+  }, [devboxes, refreshProviders]);
 
   return null;
 }
