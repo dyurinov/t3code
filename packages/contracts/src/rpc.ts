@@ -546,6 +546,7 @@ export const WS_METHODS = {
   devboxesClaim: "devboxes.claim",
   devboxesSubmitLoginCode: "devboxes.submitLoginCode",
   devboxesStartLogin: "devboxes.startLogin",
+  serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverCheckSecretSource: "server.checkSecretSource",
@@ -931,6 +932,13 @@ const WsDevboxesPairClientRpc = Rpc.make(WS_METHODS.devboxesPairClient, {
   payload: DevboxNameInput,
   success: DevboxClientPairing,
   error: devboxErrors,
+});
+
+// No in-tree caller; installed Swift TestFlight builds still request it.
+const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
+  payload: Schema.Struct({}),
+  success: ServerSettings,
+  error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -2201,6 +2209,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRunStorageCleanupRpc,
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
+  WsServerGetSettingsRpc,
   WsServerReclaimDatabaseSpaceRpc,
   WsServerUpdateSettingsRpc,
   WsPeerLinksListRpc,
