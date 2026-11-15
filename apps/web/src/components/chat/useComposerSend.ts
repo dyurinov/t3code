@@ -486,13 +486,8 @@ export function useComposerSend(input: ComposerSendInput) {
       : null;
     const sendWaitsForDevbox =
       sleepingDevbox !== null && devboxHostId !== null && !directAnnotation;
-    // Attachments upload before the turn, which needs the box; without a thread there is no row
-    // to show. Both wait as a draft instead.
-    if (
-      sendWaitsForDevbox &&
-      sleepingDevbox.state !== "running" &&
-      (!activeThread || draftHasNonPromptContent(composerDraftTarget))
-    ) {
+    // Without a loaded thread there is no row to show the message in; it waits as a draft.
+    if (sendWaitsForDevbox && sleepingDevbox.state !== "running" && !activeThread) {
       // Wake it and hold the message: it goes out once the box is back and a provider is ready.
       if (sleepingDevbox.environmentId !== null) {
         setDevboxClaim({
@@ -999,7 +994,8 @@ export function useComposerSend(input: ComposerSendInput) {
         ? attachmentCapabilitiesBeforeUpload.supportsAttachmentUploads
         : (readEnvironmentPresentation(environmentId)?.serverConfig ?? null) !== null;
     // Uploads finish after the message shows as sending; the turn starts once they land.
-    if (turnUsesAttachmentUploads) {
+    const startAttachmentUploads = () => {
+      if (!turnUsesAttachmentUploads) return;
       for (const attachment of composerAttachmentsSnapshot) {
         const upload =
           readAttachmentUpload(attachment.id)?.status === "failed"
@@ -1011,7 +1007,10 @@ export function useComposerSend(input: ComposerSendInput) {
           draftTarget: composerDraftTarget,
         });
       }
-    }
+    };
+    // A box that is down cannot take uploads; they start once it answers.
+    const uploadsWaitForDevbox = sendWaitsForDevbox && multipleModelSelections === null;
+    if (!uploadsWaitForDevbox) startAttachmentUploads();
 
     if (
       multipleModelSelections === null &&
@@ -1240,12 +1239,14 @@ export function useComposerSend(input: ComposerSendInput) {
       );
     }
 
-    const turnAttachmentsPromise = prepareTurnAttachments({
-      environmentId,
-      attachments: composerAttachmentsSnapshot,
-      usesAttachmentUploads: turnUsesAttachmentUploads,
-      draftTarget: composerDraftTarget,
-    });
+    const prepareAttachments = () =>
+      prepareTurnAttachments({
+        environmentId,
+        attachments: composerAttachmentsSnapshot,
+        usesAttachmentUploads: turnUsesAttachmentUploads,
+        draftTarget: composerDraftTarget,
+      });
+    let turnAttachmentsPromise = uploadsWaitForDevbox ? null : prepareAttachments();
     if (multipleModelSelections !== null) {
       await sendToMultipleModels({
         threadId: threadIdForSend,
@@ -1255,7 +1256,7 @@ export function useComposerSend(input: ComposerSendInput) {
         targets: multipleTargets,
         sendSnapshot,
         createdAt: messageCreatedAt,
-        attachmentsPromise: turnAttachmentsPromise,
+        attachmentsPromise: turnAttachmentsPromise ?? prepareAttachments(),
         usesAttachmentUploads: turnUsesAttachmentUploads,
         readFileBlockReason: () => readLiveAttachmentCapabilities().fileBlockReason,
         buildOutgoingMessageContext,
@@ -1346,6 +1347,9 @@ export function useComposerSend(input: ComposerSendInput) {
           Promise.reject(new Error(`${sleepingDevbox.name} did not come back in time.`)),
         );
         if (timedOut._tag === "Failure") failure = timedOut;
+      } else if (uploadsWaitForDevbox) {
+        startAttachmentUploads();
+        turnAttachmentsPromise = prepareAttachments();
       }
     }
 
@@ -1365,7 +1369,8 @@ export function useComposerSend(input: ComposerSendInput) {
     }
 
     const turnAttachmentsResult = await settlePromise(async () => {
-      const turnAttachments = await turnAttachmentsPromise;
+      // Still null only when the box never came back; `failure` already holds that.
+      const turnAttachments = await (turnAttachmentsPromise ?? Promise.resolve([]));
       const liveFileBlockReason = readLiveAttachmentCapabilities().fileBlockReason;
       if (liveFileBlockReason !== null) {
         throw new Error(liveFileBlockReason);
