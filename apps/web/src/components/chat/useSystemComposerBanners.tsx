@@ -26,7 +26,12 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { ServerUpdateAction, serverUpdateStageLabel } from "../ServerUpdateAction";
 import { useAutoBalanceUpdateBanner } from "./useAutoBalanceUpdateBanner";
-import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
+import {
+  devboxClaimAtom,
+  devboxEnvironment,
+  devboxForEnvironment,
+  useDevboxes,
+} from "../../state/devboxes";
 import { ComposerServerUpdateIcon } from "./ComposerServerUpdateStatus";
 import {
   dismissServerUpdateFailure,
@@ -93,6 +98,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     const timer = setInterval(refreshDevboxes, devboxesBusy ? 4_000 : 20_000);
     return () => clearInterval(timer);
   }, [devboxesAvailable, devboxesBusy, refreshDevboxes]);
+  const devboxClaiming = useAtomValue(devboxClaimAtom).kind !== "idle";
   const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const [wakingDevbox, setWakingDevbox] = useState(false);
   const unavailableDevbox = devboxForEnvironment(
@@ -317,8 +323,16 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
         ),
       });
     }
-    // Shown where a devbox gets picked, not over every running conversation.
-    for (const login of input.isDraft ? devboxLogins : []) {
+    // On a draft that needs it: one on a box without the sign-in, one taking a box, or one
+    // already started. Spares alone wait for the next claim instead of nagging every draft.
+    const draftDevbox = devboxForEnvironment(devboxes, activeThreadEnvironmentId);
+    const neededLogins = devboxLogins.filter(
+      (login) =>
+        login.url !== null ||
+        devboxClaiming ||
+        (draftDevbox !== null && draftDevbox.credentials[login.provider] !== "installed"),
+    );
+    for (const login of input.isDraft ? neededLogins : []) {
       const providerName = login.provider === "codex" ? "Codex" : "Claude";
       items.push({
         id: `devbox-login:${login.provider}`,

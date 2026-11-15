@@ -900,13 +900,18 @@ const make = Effect.gen(function* () {
     Effect.catchCause((cause) => Effect.logWarning("devbox keep-awake failed", { cause })),
     Effect.repeat(Schedule.spaced(KEEP_ALIVE_INTERVAL)),
   );
-  // A running box left unconnected (a failed or interrupted setup) gets another try.
+  // A running box left unconnected (a failed or interrupted setup, or one started outside
+  // T3 after a sleep removed its forward) gets another try.
   const heal = Effect.gen(function* () {
     const all = yield* workspaces;
     for (const record of (yield* Ref.get(records)).values()) {
-      if (record.environmentId !== null) continue;
       if (all.get(record.name)?.latest_build.status !== "running") continue;
       if (yield* FiberMap.has(creations, record.name)) continue;
+      if (
+        record.environmentId !== null &&
+        ((yield* FiberMap.has(tunnels, record.name)) || (yield* answersHere(record)))
+      )
+        continue;
       yield* FiberMap.run(
         creations,
         record.name,
