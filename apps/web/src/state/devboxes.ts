@@ -58,6 +58,29 @@ export function devboxForEnvironment(
   return devboxes.find((devbox) => devbox.environmentId === environmentId) ?? null;
 }
 
+/** What a devbox's row says instead of its connection health, or null once it runs. */
+export function devboxStatusLabel(devbox: DevboxSummary): string | null {
+  if (devbox.spare) return "Spare. New devbox takes it next.";
+  switch (devbox.state) {
+    case "running":
+      return null;
+    case "stopped":
+      return "Sleeping. Wake it to use it here.";
+    case "starting":
+      return "Starting… This takes a few minutes.";
+    case "stopping":
+      return "Going to sleep…";
+    case "creating":
+      return "Being set up…";
+    case "deleting":
+      return "Deleting…";
+    case "failed":
+      return devbox.lastError ?? "Did not start.";
+    case "missing":
+      return "No longer exists in Coder.";
+  }
+}
+
 /** Whether the environment is a devbox that is not running; sending to it wakes it. */
 export function useDevboxAsleep(environmentId: EnvironmentId | null): boolean {
   const { devboxes } = useDevboxes();

@@ -45,6 +45,7 @@ import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
+import { devboxForEnvironment, useDevboxes } from "../../state/devboxes";
 import { usePeerLinkHosts } from "~/state/peerLinks";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
@@ -256,7 +257,11 @@ function ConnectionsSettingsContent({
   const desktopBridge = window.desktopBridge;
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
-  const peerLinkHosts = usePeerLinkHosts();
+  const { devboxes } = useDevboxes();
+  // A devbox's own links are never used; its host links it.
+  const peerLinkHosts = usePeerLinkHosts().filter(
+    (environment) => devboxForEnvironment(devboxes, environment.environmentId) === null,
+  );
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,

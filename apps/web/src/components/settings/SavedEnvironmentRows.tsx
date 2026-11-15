@@ -37,6 +37,8 @@ import {
 import { usePreparedConnection } from "~/state/session";
 import { EnvironmentRow, environmentTransportLabel } from "./EnvironmentRow";
 import { DevboxMenuItems } from "../devbox/DevboxMenuItems";
+import { DevboxWakeButton } from "../devbox/DevboxWakeButton";
+import { devboxForEnvironment, devboxStatusLabel, useDevboxes } from "../../state/devboxes";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -195,7 +197,11 @@ export function SavedBackendListRow({
     state: connectionState,
     relayOnly,
   } = useConnectionDiagnosis(environment);
-  const diagnosis = resumingServerUpdate ? null : currentDiagnosis;
+  const { devboxes } = useDevboxes();
+  const devbox = devboxForEnvironment(devboxes, environmentId);
+  // A box that is not running is expected to be unreachable; say what it is doing instead.
+  const devboxStatus = devbox === null || isConnected ? null : devboxStatusLabel(devbox);
+  const diagnosis = resumingServerUpdate || devboxStatus !== null ? null : currentDiagnosis;
   const prepared = usePreparedConnection(environmentId);
   const connectedTarget = isConnected && prepared._tag === "Some" ? prepared.value.target : null;
   const mcpUrl = environmentMcpUrl({
@@ -211,7 +217,7 @@ export function SavedBackendListRow({
   const subtitleText = [
     environmentTransportLabel(environment, connectedTarget),
     // The headline below names the failure in full.
-    diagnosis ? null : resumingServerUpdate ? "Restarting" : status.text,
+    diagnosis ? null : resumingServerUpdate ? "Restarting" : (devboxStatus ?? status.text),
     enabled && versionMismatch ? serverVersion : null,
   ]
     .filter((value): value is string => value !== null)
@@ -254,6 +260,7 @@ export function SavedBackendListRow({
                     enabled &&
                       status.tone === "error" &&
                       !resumingServerUpdate &&
+                      devboxStatus === null &&
                       !diagnosis &&
                       "text-destructive",
                   )}
@@ -365,6 +372,7 @@ export function SavedBackendListRow({
           label={serverUpdateState.status === "failed" ? "Retry update" : "Update"}
         />
       ) : null}
+      {devbox !== null && !isConnected ? <DevboxWakeButton devbox={devbox} /> : null}
       {showUpdateAction ? (
         <ServerUpdateAction
           environmentId={environmentId}

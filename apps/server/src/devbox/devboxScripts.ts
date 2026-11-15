@@ -3,12 +3,42 @@ import * as Schema from "effect/Schema";
 /** Coder workspace names: lowercase letters, digits and single hyphens, at most 32 characters. */
 const MAX_NAME_LENGTH = 32;
 
-export function slugifyDevboxName(input: string, prefix: string | undefined): string {
-  const head = prefix ? `${slug(prefix)}-` : "";
+/**
+ * `number` goes first after the prefix, zero-padded so names list in creation order.
+ */
+export function slugifyDevboxName(
+  input: string,
+  prefix: string | undefined,
+  number?: number,
+): string {
+  const head = [prefix ? slug(prefix) : "", number === undefined ? "" : devboxNumberLabel(number)]
+    .filter(Boolean)
+    .map((part) => `${part}-`)
+    .join("");
   const body = slug(input)
     .slice(0, Math.max(1, MAX_NAME_LENGTH - head.length))
     .replace(/-+$/u, "");
   return `${head}${body || "box"}`;
+}
+
+function devboxNumberLabel(number: number): string {
+  return String(number).padStart(2, "0");
+}
+
+/** One past the stored counter and every number already in a box name after `prefix`. */
+export function nextDevboxNumber(
+  stored: number | undefined,
+  names: Iterable<string>,
+  prefix: string | undefined,
+): number {
+  const head = prefix ? `${slug(prefix)}-` : "";
+  let next = stored ?? 1;
+  for (const name of names) {
+    if (!name.startsWith(head)) continue;
+    const match = /^(\d+)-/u.exec(name.slice(head.length));
+    if (match) next = Math.max(next, Number(match[1]) + 1);
+  }
+  return next;
 }
 
 function slug(value: string): string {
@@ -288,15 +318,16 @@ export function randomDevboxName(
   prefix: string | undefined,
   taken: ReadonlySet<string>,
   random: () => number,
+  number?: number,
 ): string {
   const pick = (words: ReadonlyArray<string>) =>
     words[Math.floor(random() * words.length)] ?? words[0]!;
   for (let attempt = 0; attempt < 50; attempt++) {
-    const name = slugifyDevboxName(`${pick(NAME_ADJECTIVES)}-${pick(NAME_NOUNS)}`, prefix);
+    const name = slugifyDevboxName(`${pick(NAME_ADJECTIVES)}-${pick(NAME_NOUNS)}`, prefix, number);
     if (!taken.has(name)) return name;
   }
   return uniqueDevboxName(
-    slugifyDevboxName(`${pick(NAME_ADJECTIVES)}-${pick(NAME_NOUNS)}`, prefix),
+    slugifyDevboxName(`${pick(NAME_ADJECTIVES)}-${pick(NAME_NOUNS)}`, prefix, number),
     taken,
   );
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  nextDevboxNumber,
   parseCoderList,
   parsePairingToken,
   randomDevboxName,
@@ -24,6 +25,23 @@ describe("devbox names", () => {
     expect(name).toBe(expected);
     expect(name.length).toBeLessThanOrEqual(32);
     expect(name).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/u);
+  });
+
+  it("puts the creation number first after the prefix, zero-padded", () => {
+    expect(slugifyDevboxName("shiny pine", undefined, 3)).toBe("03-shiny-pine");
+    expect(slugifyDevboxName("shiny pine", "dyurinov", 12)).toBe("dyurinov-12-shiny-pine");
+    expect(slugifyDevboxName("a very long task description", "dyurinov", 7)).toBe(
+      "dyurinov-07-a-very-long-task-des",
+    );
+    expect(randomDevboxName(undefined, new Set(), () => 0, 1)).toMatch(/^01-[a-z]+-[a-z]+$/u);
+  });
+
+  it("numbers past the stored counter and every numbered box, ignoring older names", () => {
+    expect(nextDevboxNumber(undefined, [], undefined)).toBe(1);
+    expect(nextDevboxNumber(undefined, ["shiny-pine", "dyurinov-1"], undefined)).toBe(1);
+    expect(nextDevboxNumber(4, ["02-calm-lake"], undefined)).toBe(4);
+    expect(nextDevboxNumber(2, ["09-calm-lake", "shiny-pine"], undefined)).toBe(10);
+    expect(nextDevboxNumber(undefined, ["dyurinov-05-calm-lake"], "dyurinov")).toBe(6);
   });
 
   it("adds a number when Coder already has the name, staying within 32 characters", () => {

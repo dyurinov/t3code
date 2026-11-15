@@ -3,7 +3,6 @@ import { ANOTHER_ADDRESS, linkRequestFailureMessage } from "@t3tools/client-runt
 import {
   AuthAccessWriteScope,
   type AuthMcpClientAccess,
-  type DevboxSummary,
   type EnvironmentId,
   type PeerLinkSummary,
 } from "@t3tools/contracts";
@@ -19,7 +18,8 @@ import { PlusIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
-import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "~/state/devboxes";
+import { environmentCatalog } from "~/connection/catalog";
+import { devboxForEnvironment, devboxStatusLabel, useDevboxes } from "~/state/devboxes";
 import { mintPairingCodeOn } from "~/state/peerPairingCode";
 import { peerLinkEnvironment, useLinkableMachines } from "~/state/peerLinks";
 import { useEnvironmentQuery } from "~/state/query";
@@ -27,6 +27,7 @@ import { useEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { accessConfig } from "../auth/ConnectAgentSurface";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
+import { DevboxWakeButton } from "../devbox/DevboxWakeButton";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -76,6 +77,15 @@ export function LinkedEnvironmentsSettings({
     },
   );
   const canLink = useAtomValue(peerLinkEnvironment.link.permissionAtom(environmentId));
+  const { hostEnvironmentId, devboxes } = useDevboxes();
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  // A devbox this client is connected to is listed under Environments with its own menu.
+  const visibleLinks = (links.data?.links ?? []).filter(
+    (link) =>
+      environmentId !== hostEnvironmentId ||
+      devboxForEnvironment(devboxes, link.environmentId) === null ||
+      !catalog.entries.has(link.environmentId),
+  );
   const search = searchableSetting("linked-environments");
   return (
     <SettingsSection
@@ -87,13 +97,13 @@ export function LinkedEnvironmentsSettings({
         <SettingsRow title="Could not load linked environments" description={links.error} />
       ) : !links.data ? (
         <SettingsRow title="Loading linked environments…" role="status" />
-      ) : links.data.links.length === 0 ? (
+      ) : visibleLinks.length === 0 ? (
         <SettingsRow
           title="No linked environments"
           description="Link another machine running T3 Code, such as a VPS, so agents here can launch and drive threads there."
         />
       ) : (
-        links.data.links.map((link) => (
+        visibleLinks.map((link) => (
           <LinkedEnvironmentRow
             key={link.environmentId}
             environmentId={environmentId}
@@ -133,27 +143,16 @@ function LinkedEnvironmentRow({
       failureToast("Could not forget the link", String(squashAtomCommandFailure(result)));
     }
   };
-  const { hostEnvironmentId, devboxes, refresh: refreshDevboxes } = useDevboxes();
+  const { hostEnvironmentId, devboxes } = useDevboxes();
   const devbox =
     environmentId === hostEnvironmentId ? devboxForEnvironment(devboxes, link.environmentId) : null;
-  const wake = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const devboxChanging = devbox?.state === "starting" || devbox?.state === "stopping";
   const wasChanging = useRef(false);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the host does not push devbox state; follow a box while it starts or stops.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the link's health is from before the box woke; ask again once it is up.
   useEffect(() => {
-    // The link's health is from before the box woke; ask again once it is up.
     if (wasChanging.current && !devboxChanging) onDevboxSettled();
     wasChanging.current = devboxChanging;
-    if (!devboxChanging) return;
-    const timer = setInterval(refreshDevboxes, 5_000);
-    return () => clearInterval(timer);
-  }, [devboxChanging, refreshDevboxes, onDevboxSettled]);
-  const wakeDevbox = async () => {
-    if (devbox === null || hostEnvironmentId === null) return;
-    const result = await wake({ environmentId: hostEnvironmentId, input: { name: devbox.name } });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result))
-      failureToast(`Could not wake ${devbox.name}`, String(squashAtomCommandFailure(result)));
-  };
+  }, [devboxChanging, onDevboxSettled]);
   const devboxStatus = devbox === null ? null : devboxStatusLabel(devbox);
   const status =
     devboxStatus ??
@@ -192,13 +191,9 @@ function LinkedEnvironmentRow({
           <p className="truncate text-xs text-muted-foreground/80">{link.urls.join(", ")}</p>
         </div>
         {devbox !== null ? (
-          !devbox.spare && (devbox.state === "stopped" || devbox.state === "failed") ? (
-            <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
-              <Button size="xs" onClick={() => void wakeDevbox()}>
-                {devbox.state === "failed" ? "Try again" : "Wake devbox"}
-              </Button>
-            </div>
-          ) : null
+          <div className="flex w-full shrink-0 items-center gap-2 empty:hidden sm:w-auto sm:justify-end">
+            <DevboxWakeButton devbox={devbox} />
+          </div>
         ) : canUnlink ? (
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Button
@@ -214,29 +209,6 @@ function LinkedEnvironmentRow({
       </div>
     </div>
   );
-}
-
-/** What a devbox row says instead of the link's health, or null once the box runs. */
-function devboxStatusLabel(devbox: DevboxSummary): string | null {
-  if (devbox.spare) return "Spare. New devbox takes it next.";
-  switch (devbox.state) {
-    case "running":
-      return null;
-    case "stopped":
-      return "Sleeping. Wake it to use it here.";
-    case "starting":
-      return "Starting… This takes a few minutes.";
-    case "stopping":
-      return "Going to sleep…";
-    case "creating":
-      return "Being set up…";
-    case "deleting":
-      return "Deleting…";
-    case "failed":
-      return devbox.lastError ?? "Did not start.";
-    case "missing":
-      return "No longer exists in Coder.";
-  }
 }
 
 function LinkEnvironmentAction({ environmentId }: { readonly environmentId: EnvironmentId }) {

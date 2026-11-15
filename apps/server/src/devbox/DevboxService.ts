@@ -53,6 +53,7 @@ import {
   REMOTE_T3_PORT,
   parseCoderList,
   parsePairingToken,
+  nextDevboxNumber,
   randomDevboxName,
   BROWSER_FILTER_SCRIPT,
   slugifyDevboxName,
@@ -76,7 +77,11 @@ const DevboxRecord = Schema.Struct({
   provisioned: Schema.optionalKey(Schema.String),
 });
 type DevboxRecord = typeof DevboxRecord.Type;
-const DevboxFile = Schema.Struct({ devboxes: Schema.Array(DevboxRecord) });
+const DevboxFile = Schema.Struct({
+  devboxes: Schema.Array(DevboxRecord),
+  /** The number the next box gets; numbers are never reused, even after a delete. */
+  nextNumber: Schema.optionalKey(Schema.Number),
+});
 const decodeFile = Schema.decodeUnknownEffect(Schema.fromJsonString(DevboxFile));
 const encodeFile = Schema.encodeEffect(Schema.fromJsonString(DevboxFile));
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -168,6 +173,7 @@ const make = Effect.gen(function* () {
     .writeFileString(browserFilter, BROWSER_FILTER_SCRIPT, { mode: 0o755 })
     .pipe(Effect.ignore);
   const records = yield* Ref.make<ReadonlyMap<string, DevboxRecord>>(new Map());
+  const nextNumber = yield* Ref.make<number | undefined>(undefined);
   const transient = yield* Ref.make<ReadonlyMap<string, Transient>>(new Map());
   const locks = yield* KeyedLock.make<string>();
   const tunnels = yield* FiberMap.make<string>();
@@ -180,13 +186,16 @@ const make = Effect.gen(function* () {
   // ── storage ──────────────────────────────────────────────────────────────
   const load = fs.readFileString(storePath).pipe(
     Effect.flatMap(decodeFile),
-    Effect.map((file) => new Map(file.devboxes.map((record) => [record.name, record]))),
-    Effect.orElseSucceed(() => new Map<string, DevboxRecord>()),
+    Effect.orElseSucceed((): typeof DevboxFile.Type => ({ devboxes: [] })),
   );
   const save = Effect.fn("DevboxService.save")(
     function* () {
       const current = yield* Ref.get(records);
-      const text = `${yield* encodeFile({ devboxes: [...current.values()] })}\n`;
+      const number = yield* Ref.get(nextNumber);
+      const text = `${yield* encodeFile({
+        devboxes: [...current.values()],
+        ...(number === undefined ? {} : { nextNumber: number }),
+      })}\n`;
       yield* fs.writeFileString(`${storePath}.tmp`, text);
       yield* fs.rename(`${storePath}.tmp`, storePath);
     },
@@ -583,10 +592,14 @@ const make = Effect.gen(function* () {
       state = (state * 1103515245 + 12345) % 2147483648;
       return state / 2147483648;
     };
+    const number = yield* Ref.modify(nextNumber, (stored) => {
+      const picked = nextDevboxNumber(stored, taken, namePrefix);
+      return [picked, picked + 1];
+    });
     const name =
       input.name !== undefined
-        ? uniqueDevboxName(slugifyDevboxName(input.name, namePrefix), taken)
-        : randomDevboxName(namePrefix, taken, random);
+        ? uniqueDevboxName(slugifyDevboxName(input.name, namePrefix, number), taken)
+        : randomDevboxName(namePrefix, taken, random, number);
     const record: DevboxRecord = {
       name,
       localPort: yield* nextPort,
@@ -854,7 +867,9 @@ const make = Effect.gen(function* () {
     );
 
   // ── background: reconnect running boxes, keep busy boxes awake ───────────
-  yield* Ref.set(records, yield* load);
+  const stored = yield* load;
+  yield* Ref.set(records, new Map(stored.devboxes.map((record) => [record.name, record])));
+  yield* Ref.set(nextNumber, stored.nextNumber);
   const reconnect = Effect.gen(function* () {
     const all = yield* workspaces;
     const ordered = [...(yield* Ref.get(records)).values()].toSorted(
