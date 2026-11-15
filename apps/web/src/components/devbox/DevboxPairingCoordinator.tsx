@@ -6,10 +6,16 @@ import { environmentCatalog } from "../../connection/catalog";
 import { connectPairing } from "../../connection/onboarding";
 import { clientHostEnvironmentAtom } from "../../state/clientHostEnvironment";
 import { devboxClaimAtom, devboxEnvironment, useDevboxes } from "../../state/devboxes";
+import { useEnvironments } from "../../state/environments";
+import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 
 // Once per page load, so a box this client was removed from stays removed until a reload.
 const attempted = new Set<EnvironmentId>();
+// Boxes seen down; their provider status is from boot and gets checked again once they answer.
+const woken = new Set<EnvironmentId>();
+// A box just up is still running its startup script, which can starve the provider probe.
+const PROVIDER_RECHECK_DELAY_MS = 20_000;
 
 /**
  * Connects this client to the host's claimed devboxes it is not paired with yet, so a box
@@ -20,9 +26,13 @@ export function DevboxPairingCoordinator() {
   const { hostEnvironmentId, devboxes } = useDevboxes();
   const onHost = useAtomValue(clientHostEnvironmentAtom(hostEnvironmentId));
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const { environments } = useEnvironments();
   const claiming = useAtomValue(devboxClaimAtom).kind !== "idle";
   const pairClient = useAtomCommand(devboxEnvironment.pairClient, { reportFailure: false });
   const connect = useAtomCommand(connectPairing, { reportFailure: false });
+  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pairs with servers outside React as the host reports them
   useEffect(() => {
@@ -44,6 +54,25 @@ export function DevboxPairingCoordinator() {
       );
     }
   }, [hostEnvironmentId, onHost, catalog, claiming, devboxes, pairClient, connect]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- re-probes a woken box's providers, which its server checked while booting
+  useEffect(() => {
+    for (const devbox of devboxes) {
+      if (devbox.environmentId !== null && devbox.state !== "running")
+        woken.add(devbox.environmentId);
+    }
+    for (const environment of environments) {
+      if (!woken.has(environment.environmentId)) continue;
+      if (environment.connection.phase !== "connected") continue;
+      woken.delete(environment.environmentId);
+      const environmentId = environment.environmentId;
+      // Not cancelled on re-render: the box has left `woken`, so nothing would schedule it again.
+      setTimeout(
+        () => void refreshProviders({ environmentId, input: { refreshModels: true } }),
+        PROVIDER_RECHECK_DELAY_MS,
+      );
+    }
+  }, [devboxes, environments, refreshProviders]);
 
   return null;
 }

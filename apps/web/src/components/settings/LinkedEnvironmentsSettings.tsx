@@ -98,6 +98,7 @@ export function LinkedEnvironmentsSettings({
             key={link.environmentId}
             environmentId={environmentId}
             link={link}
+            onDevboxSettled={links.refresh}
           />
         ))
       )}
@@ -108,9 +109,11 @@ export function LinkedEnvironmentsSettings({
 function LinkedEnvironmentRow({
   environmentId,
   link,
+  onDevboxSettled,
 }: {
   readonly environmentId: EnvironmentId;
   readonly link: PeerLinkSummary;
+  readonly onDevboxSettled: () => void;
 }) {
   const nowMinute = useNowMinute();
   const health = peerLinkHealth(link, DateTime.makeUnsafe(nowMinute));
@@ -135,12 +138,16 @@ function LinkedEnvironmentRow({
     environmentId === hostEnvironmentId ? devboxForEnvironment(devboxes, link.environmentId) : null;
   const wake = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
   const devboxChanging = devbox?.state === "starting" || devbox?.state === "stopping";
+  const wasChanging = useRef(false);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the host does not push devbox state; follow a box while it starts or stops.
   useEffect(() => {
+    // The link's health is from before the box woke; ask again once it is up.
+    if (wasChanging.current && !devboxChanging) onDevboxSettled();
+    wasChanging.current = devboxChanging;
     if (!devboxChanging) return;
     const timer = setInterval(refreshDevboxes, 5_000);
     return () => clearInterval(timer);
-  }, [devboxChanging, refreshDevboxes]);
+  }, [devboxChanging, refreshDevboxes, onDevboxSettled]);
   const wakeDevbox = async () => {
     if (devbox === null || hostEnvironmentId === null) return;
     const result = await wake({ environmentId: hostEnvironmentId, input: { name: devbox.name } });
@@ -185,7 +192,7 @@ function LinkedEnvironmentRow({
           <p className="truncate text-xs text-muted-foreground/80">{link.urls.join(", ")}</p>
         </div>
         {devbox !== null ? (
-          devbox.state === "stopped" || devbox.state === "failed" ? (
+          !devbox.spare && (devbox.state === "stopped" || devbox.state === "failed") ? (
             <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
               <Button size="xs" onClick={() => void wakeDevbox()}>
                 {devbox.state === "failed" ? "Try again" : "Wake devbox"}
@@ -211,6 +218,7 @@ function LinkedEnvironmentRow({
 
 /** What a devbox row says instead of the link's health, or null once the box runs. */
 function devboxStatusLabel(devbox: DevboxSummary): string | null {
+  if (devbox.spare) return "Spare. New devbox takes it next.";
   switch (devbox.state) {
     case "running":
       return null;
