@@ -58,6 +58,13 @@ export function devboxForEnvironment(
   return devboxes.find((devbox) => devbox.environmentId === environmentId) ?? null;
 }
 
+/** Whether the environment is a devbox that is not running; sending to it wakes it. */
+export function useDevboxAsleep(environmentId: EnvironmentId | null): boolean {
+  const { devboxes } = useDevboxes();
+  const state = devboxForEnvironment(devboxes, environmentId)?.state;
+  return state !== undefined && state !== "running";
+}
+
 /**
  * This client taking a devbox for the draft: preparing (the host claims and wakes a box),
  * ready (paired; waiting for its project to load so the draft can move), then switched.

@@ -11,6 +11,7 @@ import {
 } from "./runtimeModeConfig";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
+import { useDevboxAsleep } from "../../state/devboxes";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { importPastedComposerText, readPastedComposerContext } from "../composerInlineTokenPaste";
 import {
@@ -1847,6 +1848,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const { blocksSubmission: voiceInputActive, submitAfterDictation } = speechInput;
   // A compact footer gives the dictation capsule the whole row beside the send button.
   const dictationTakesFooter = isComposerFooterCompact && speechInput.state.phase !== "idle";
+  const devboxAsleep = useDevboxAsleep(environmentId);
   const submissionTarget = activePendingProgress ? "pending-user-input" : "provider-turn";
   const submissionBlocked = isComposerSubmissionBlocked({
     submissionTarget,
@@ -2129,7 +2131,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       submitAfterDictation(() => submitComposerRef.current(dispatchMode, submissionIntent));
       return false;
     }
-    if (submissionBlocked || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
+    // A devbox asleep since this page loaded has not reported its scopes; sending wakes it.
+    if (
+      submissionBlocked ||
+      (!devboxAsleep && !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
+    ) {
       event?.preventDefault();
       return false;
     }

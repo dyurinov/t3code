@@ -318,7 +318,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
                 {environmentReconnecting ? "Retry now" : "Reconnect"}
               </Button>
             ) : null}
-            {devboxPhase === null ? disconnectAction : null}
+            {unavailableDevbox === null ? disconnectAction : null}
           </>
         ),
       });
