@@ -1643,18 +1643,26 @@ export function useComposerSend(input: ComposerSendInput) {
       stackedThreadToast({
         type: "warning",
         title: `${devboxClaim.name} has no provider ready`,
-        description: "Your message stays here. Sign in a provider on the devbox, then send.",
+        description:
+          "Your message stays here. Add sign-ins in Settings → Devboxes; the box picks them up, then send.",
       }),
     );
   });
+  // The host knows a box got no sign-ins at all; waiting for a provider would be in vain.
+  const claimedDevbox = devboxForEnvironment(devboxes, environmentId);
+  const devboxWithoutLogins =
+    claimedDevbox !== null &&
+    claimedDevbox.state === "running" &&
+    claimedDevbox.credentials.claude !== "installed" &&
+    claimedDevbox.credentials.codex !== "installed";
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the draft and its provider status arrive asynchronously from the devbox's environment.
   useEffect(() => {
     finishDevboxClaim(devboxClaim.kind, environmentId, devboxProviderReady);
     if (devboxClaim.kind !== "switched" || devboxProviderReady) return;
     // Waking a sleeping box takes a few minutes; a freshly taken one is ready far sooner.
-    const timer = setTimeout(abandonQueuedDevboxSend, 360_000);
+    const timer = setTimeout(abandonQueuedDevboxSend, devboxWithoutLogins ? 0 : 360_000);
     return () => clearTimeout(timer);
-  }, [devboxClaim.kind, environmentId, devboxProviderReady]);
+  }, [devboxClaim.kind, environmentId, devboxProviderReady, devboxWithoutLogins]);
 
   return { onSend: onSendWithRouting };
 }
