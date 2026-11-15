@@ -409,7 +409,11 @@ export function useComposerSend(input: ComposerSendInput) {
     const deadline = Date.now() + 6 * 60_000;
     try {
       while (Date.now() < deadline) {
-        if (readEnvironmentPresentation(environmentId)?.connection.phase === "connected")
+        // Scopes land a moment after the socket; uploads refuse to start until they do.
+        if (
+          readEnvironmentPresentation(environmentId)?.connection.phase === "connected" &&
+          readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+        )
           return true;
         await new Promise((resolve) => setTimeout(resolve, 1_500));
       }
