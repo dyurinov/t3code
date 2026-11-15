@@ -29,6 +29,8 @@ export const DevboxSummary = Schema.Struct({
   /** Loopback address this machine reaches the box's T3 server at. */
   url: Schema.String,
   task: Schema.NullOr(Schema.String),
+  /** Prepared for the next claim and not yet anyone's. */
+  spare: Schema.Boolean,
   createdAt: Schema.String,
   /** When Coder stops the box unless a running turn extends it. */
   deadline: Schema.NullOr(Schema.String),

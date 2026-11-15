@@ -319,6 +319,7 @@ const make = Effect.gen(function* () {
     environmentId: record.environmentId as EnvironmentId | null,
     url: `http://127.0.0.1:${record.localPort}`,
     task: record.task,
+    spare: record.spare === true,
     createdAt: record.createdAt,
     deadline: workspace?.latest_build.deadline ?? null,
     credentials: record.credentials,
