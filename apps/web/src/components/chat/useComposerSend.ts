@@ -19,6 +19,7 @@ import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import {
   AuthOrchestrationOperateScope,
   DEFAULT_MODEL,
+  type DevboxSummary,
   type EnvironmentId,
   type ModelSelection,
   type PreviewAnnotationPayload,
@@ -60,10 +61,12 @@ import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { isProviderInstancePickerReady } from "../../providerInstances";
-import { useAtom } from "@effect/atom-react";
+import { useAtom, useAtomSet } from "@effect/atom-react";
 import {
   devboxEnvironment,
   devboxForEnvironment,
+  devboxSendKey,
+  devboxSendWaitsAtom,
   devboxClaimAtom,
   useDevboxes,
 } from "../../state/devboxes";
@@ -388,6 +391,31 @@ export function useComposerSend(input: ComposerSendInput) {
     respondingRequestIdsRef.current = respondingRequestIds;
   }, [pendingApprovals, respondingRequestIds]);
 
+  const setDevboxSendWaits = useAtomSet(devboxSendWaitsAtom);
+  /** Wakes the box if it sleeps and resolves once this client is connected to it again. */
+  const waitForDevbox = async (devbox: DevboxSummary, threadId: string) => {
+    const key = devboxSendKey(environmentId, threadId);
+    setDevboxSendWaits((current) => new Map(current).set(key, `Waking ${devbox.name}…`));
+    if (devboxHostId !== null && (devbox.state === "stopped" || devbox.state === "failed"))
+      void wakeDevbox({ environmentId: devboxHostId, input: { name: devbox.name } });
+    // Waking takes about 90 seconds; give a slow start-up script room before giving up.
+    const deadline = Date.now() + 6 * 60_000;
+    try {
+      while (Date.now() < deadline) {
+        if (readEnvironmentPresentation(environmentId)?.connection.phase === "connected")
+          return true;
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      }
+      return false;
+    } finally {
+      setDevboxSendWaits((current) => {
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+
   const onSend = async (
     e?: { preventDefault: () => void },
     dispatchMode: ComposerDispatchMode = "auto",
@@ -445,15 +473,18 @@ export function useComposerSend(input: ComposerSendInput) {
         }),
       );
     };
-    // Before the thread checks: a box asleep since this page loaded never sent its thread here.
+    // A devbox that is down takes the message as sent and wakes; the turn starts once it answers.
     const sleepingDevbox = activeEnvironmentUnavailable
       ? devboxForEnvironment(devboxes, environmentId)
       : null;
+    const sendWaitsForDevbox =
+      sleepingDevbox !== null && devboxHostId !== null && !directAnnotation;
+    // Attachments upload before the turn, which needs the box; without a thread there is no row
+    // to show. Both wait as a draft instead.
     if (
-      sleepingDevbox !== null &&
+      sendWaitsForDevbox &&
       sleepingDevbox.state !== "running" &&
-      devboxHostId !== null &&
-      !directAnnotation
+      (!activeThread || draftHasNonPromptContent(composerDraftTarget))
     ) {
       // Wake it and hold the message: it goes out once the box is back and a provider is ready.
       if (sleepingDevbox.environmentId !== null) {
@@ -474,12 +505,15 @@ export function useComposerSend(input: ComposerSendInput) {
       void wakeDevbox({ environmentId: devboxHostId, input: { name: sleepingDevbox.name } });
       return;
     }
+    // A box down since this page loaded has reported neither its scopes nor its thread yet; the
+    // host links every devbox with full access, and the box checks the command once it answers.
     if (
-      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
+      (!sendWaitsForDevbox &&
+        !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) ||
       !activeThread ||
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
-      threadDetailLoading ||
+      (!sendWaitsForDevbox && threadDetailLoading) ||
       readPendingEnvironmentChange() !== null ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
@@ -525,7 +559,7 @@ export function useComposerSend(input: ComposerSendInput) {
       );
       return;
     }
-    if (activeEnvironmentUnavailable) {
+    if (activeEnvironmentUnavailable && !sendWaitsForDevbox) {
       const toastSlot = environmentUnavailableSendToastSlotRef.current;
       environmentUnavailableSendToastSlotRef.current =
         (toastSlot + 1) % ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE;
@@ -1004,7 +1038,8 @@ export function useComposerSend(input: ComposerSendInput) {
       return;
     }
     if (
-      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
+      (!sendWaitsForDevbox &&
+        !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) ||
       attachmentCapabilitiesBeforeDispatch.fileBlockReason !== null
     ) {
       sendInFlightRef.current = false;
@@ -1291,6 +1326,16 @@ export function useComposerSend(input: ComposerSendInput) {
     );
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
+
+    if (sendWaitsForDevbox) {
+      const ready = await waitForDevbox(sleepingDevbox, threadIdForSend);
+      if (!ready) {
+        const timedOut = await settlePromise(() =>
+          Promise.reject(new Error(`${sleepingDevbox.name} did not come back in time.`)),
+        );
+        if (timedOut._tag === "Failure") failure = timedOut;
+      }
+    }
 
     if (failure === null && isServerThread) {
       const settingsResult = await persistThreadSettingsForNextTurn({

@@ -259,7 +259,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
                   : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
         description:
           devboxPhase === "starting" ? (
-            "This takes a few minutes. Your draft stays here."
+            "This takes a minute or two."
           ) : devboxPhase === "failed" ? (
             (unavailableDevbox?.lastError ?? "Starting it failed.")
           ) : devboxPhase === "sleeping" ? (

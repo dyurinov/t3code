@@ -1,5 +1,10 @@
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
-import { useDevboxAsleep, useDevboxes } from "../state/devboxes";
+import {
+  devboxSendKey,
+  devboxSendWaitsAtom,
+  useDevboxAsleep,
+  useDevboxes,
+} from "../state/devboxes";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
@@ -1314,6 +1319,8 @@ export default function ChatView(props: ChatViewProps) {
   // messages, so it would otherwise be offered a machine picker that does nothing.
   // A machine that can create devboxes offers one as another place to run.
   const devboxesAvailable = useDevboxes().available;
+  const devboxSendWaitLabel =
+    useAtomValue(devboxSendWaitsAtom).get(devboxSendKey(environmentId, threadId)) ?? null;
   // Sending to a devbox that is not running wakes it, so the composer must not block it.
   const activeDevboxAsleep =
     useDevboxAsleep(activeEnvironment?.environmentId ?? null) && activeEnvironmentUnavailable;
@@ -3477,7 +3484,9 @@ export default function ChatView(props: ChatViewProps) {
                     activePendingApproval?.requestId ?? activePendingUserInput?.requestId ?? null
                   }
                   activeTurnStartedAt={activeWorkStartedAt}
-                  providerStartingLabel={activeActivityRun?.providerStartingLabel ?? null}
+                  providerStartingLabel={
+                    devboxSendWaitLabel ?? activeActivityRun?.providerStartingLabel ?? null
+                  }
                   worktreeSetup={worktreeSetup}
                   onCancelWorktreeSetup={onCancelWorktreeSetupStable}
                   retryableWorkspacePreparationRunIds={retryableWorkspacePreparationRunIds}

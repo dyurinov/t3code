@@ -85,6 +85,19 @@ export type DevboxClaimState =
       readonly queuedSend: boolean;
     };
 
+/**
+ * Sends shown as sent while their devbox wakes, by `devboxSendKey`: what the working row says
+ * until the box connects and the message goes out.
+ */
+export const devboxSendWaitsAtom = Atom.make<ReadonlyMap<string, string>>(new Map()).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("devboxes:send-waits"),
+);
+
+export function devboxSendKey(environmentId: EnvironmentId, threadId: string): string {
+  return `${environmentId}:${threadId}`;
+}
+
 export const devboxClaimAtom = Atom.make<DevboxClaimState>({ kind: "idle" }).pipe(
   Atom.keepAlive,
   Atom.withLabel("devboxes:claim"),
