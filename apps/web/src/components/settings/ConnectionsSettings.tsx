@@ -46,6 +46,11 @@ import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { devboxForEnvironment, useDevboxes } from "../../state/devboxes";
+import {
+  SpareDevboxesSection,
+  UnpairedDevboxRows,
+  useUnpairedDevboxes,
+} from "../devbox/DevboxEnvironmentRows";
 import { usePeerLinkHosts } from "~/state/peerLinks";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
@@ -258,6 +263,7 @@ function ConnectionsSettingsContent({
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const { devboxes } = useDevboxes();
+  const unpairedDevboxes = useUnpairedDevboxes();
   // A devbox's own links are never used; its host links it.
   const peerLinkHosts = usePeerLinkHosts().filter(
     (environment) => devboxForEnvironment(devboxes, environment.environmentId) === null,
@@ -1717,11 +1723,17 @@ function ConnectionsSettingsContent({
             }}
           />
         ))}
-        <CloudRemoteEnvironmentRows
-          primaryEnvironmentId={primaryEnvironmentId}
-          savedEnvironments={savedEnvironments}
-        />
+        <UnpairedDevboxRows devboxes={unpairedDevboxes} />
+        {unpairedDevboxes.length > 0 &&
+        savedEnvironments.length === 0 &&
+        !hasCloudPublicConfig() ? null : (
+          <CloudRemoteEnvironmentRows
+            primaryEnvironmentId={primaryEnvironmentId}
+            savedEnvironments={savedEnvironments}
+          />
+        )}
       </SettingsSection>
+      <SpareDevboxesSection />
       {hasCloudPublicConfig() ? (
         <RemoveT3ConnectEnvironmentDialog
           environmentLabel={pendingT3ConnectRemoval?.label ?? null}

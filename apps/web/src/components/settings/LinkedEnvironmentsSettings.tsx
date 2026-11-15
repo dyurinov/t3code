@@ -15,11 +15,10 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { PlusIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
-import { environmentCatalog } from "~/connection/catalog";
-import { devboxForEnvironment, devboxStatusLabel, useDevboxes } from "~/state/devboxes";
+import { devboxForEnvironment, useDevboxes } from "~/state/devboxes";
 import { mintPairingCodeOn } from "~/state/peerPairingCode";
 import { peerLinkEnvironment, useLinkableMachines } from "~/state/peerLinks";
 import { useEnvironmentQuery } from "~/state/query";
@@ -27,8 +26,6 @@ import { useEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { accessConfig } from "../auth/ConnectAgentSurface";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
-import { DevboxBadge } from "../devbox/DevboxBadge";
-import { DevboxWakeButton } from "../devbox/DevboxWakeButton";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -79,13 +76,11 @@ export function LinkedEnvironmentsSettings({
   );
   const canLink = useAtomValue(peerLinkEnvironment.link.permissionAtom(environmentId));
   const { hostEnvironmentId, devboxes } = useDevboxes();
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
-  // A devbox this client is connected to is listed under Environments with its own menu.
+  // Devboxes list under Environments and Spare devboxes; their links are the host's plumbing.
   const visibleLinks = (links.data?.links ?? []).filter(
     (link) =>
       environmentId !== hostEnvironmentId ||
-      devboxForEnvironment(devboxes, link.environmentId) === null ||
-      !catalog.entries.has(link.environmentId),
+      devboxForEnvironment(devboxes, link.environmentId) === null,
   );
   const search = searchableSetting("linked-environments");
   return (
@@ -109,7 +104,6 @@ export function LinkedEnvironmentsSettings({
             key={link.environmentId}
             environmentId={environmentId}
             link={link}
-            onDevboxSettled={links.refresh}
           />
         ))
       )}
@@ -120,11 +114,9 @@ export function LinkedEnvironmentsSettings({
 function LinkedEnvironmentRow({
   environmentId,
   link,
-  onDevboxSettled,
 }: {
   readonly environmentId: EnvironmentId;
   readonly link: PeerLinkSummary;
-  readonly onDevboxSettled: () => void;
 }) {
   const nowMinute = useNowMinute();
   const health = peerLinkHealth(link, DateTime.makeUnsafe(nowMinute));
@@ -144,20 +136,8 @@ function LinkedEnvironmentRow({
       failureToast("Could not forget the link", String(squashAtomCommandFailure(result)));
     }
   };
-  const { hostEnvironmentId, devboxes } = useDevboxes();
-  const devbox =
-    environmentId === hostEnvironmentId ? devboxForEnvironment(devboxes, link.environmentId) : null;
-  const devboxChanging = devbox?.state === "starting" || devbox?.state === "stopping";
-  const wasChanging = useRef(false);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the link's health is from before the box woke; ask again once it is up.
-  useEffect(() => {
-    if (wasChanging.current && !devboxChanging) onDevboxSettled();
-    wasChanging.current = devboxChanging;
-  }, [devboxChanging, onDevboxSettled]);
-  const devboxStatus = devbox === null ? null : devboxStatusLabel(devbox);
   const status =
-    devboxStatus ??
-    (health.kind === "expired"
+    health.kind === "expired"
       ? "Expired. Link it again with a new pairing code."
       : health.kind === "unreachable"
         ? (health.detail ?? "Not answering right now.")
@@ -165,7 +145,7 @@ function LinkedEnvironmentRow({
           ? health.detail
           : health.expiresInDays !== null
             ? `Expires in ${health.expiresInDays} ${health.expiresInDays === 1 ? "day" : "days"}. Link it again to renew.`
-            : "Reachable");
+            : "Reachable";
   return (
     <div className={ITEM_ROW_CLASSNAME}>
       <div className={ITEM_ROW_INNER_CLASSNAME}>
@@ -185,18 +165,13 @@ function LinkedEnvironmentRow({
               pingClassName={null}
             />
             <h3 className="text-sm font-medium text-foreground">{link.label}</h3>
-            {devbox !== null ? <DevboxBadge /> : null}
           </div>
           <p className="text-xs text-muted-foreground">
             {accessConfig[link.access].label} · {status}
           </p>
           <p className="truncate text-xs text-muted-foreground/80">{link.urls.join(", ")}</p>
         </div>
-        {devbox !== null ? (
-          <div className="flex w-full shrink-0 items-center gap-2 empty:hidden sm:w-auto sm:justify-end">
-            <DevboxWakeButton devbox={devbox} />
-          </div>
-        ) : canUnlink ? (
+        {canUnlink ? (
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Button
               size="xs"
