@@ -1,5 +1,5 @@
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
-import { useDevboxes } from "../state/devboxes";
+import { devboxForEnvironment, useDevboxes } from "../state/devboxes";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
@@ -1307,7 +1307,12 @@ export default function ChatView(props: ChatViewProps) {
   // rule out a started thread: one whose machine is offline never loads its
   // messages, so it would otherwise be offered a machine picker that does nothing.
   // A machine that can create devboxes offers one as another place to run.
-  const devboxesAvailable = useDevboxes().available;
+  const { available: devboxesAvailable, devboxes } = useDevboxes();
+  // Sending to a devbox that is not running wakes it, so the composer must not block it.
+  const activeDevboxAsleep =
+    activeEnvironmentUnavailable &&
+    (devboxForEnvironment(devboxes, activeEnvironment.environmentId)?.state ?? "running") !==
+      "running";
   const canChangeEnvironment =
     (hasMultipleEnvironments || devboxesAvailable) &&
     !envLocked &&
@@ -3707,7 +3712,9 @@ export default function ChatView(props: ChatViewProps) {
                                     ? openUsageLimits
                                     : undefined
                                 }
-                                environmentUnavailable={activeEnvironmentUnavailableState}
+                                environmentUnavailable={
+                                  activeDevboxAsleep ? null : activeEnvironmentUnavailableState
+                                }
                                 activePendingApproval={activePendingApproval}
                                 pendingApprovals={pendingApprovals}
                                 onHeldRequestIdsChange={onHeldRequestIdsChange}
