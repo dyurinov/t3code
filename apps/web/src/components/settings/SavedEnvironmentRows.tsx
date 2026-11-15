@@ -201,7 +201,12 @@ export function SavedBackendListRow({
   const { devboxes } = useDevboxes();
   const devbox = devboxForEnvironment(devboxes, environmentId);
   // A box that is not running is expected to be unreachable; say what it is doing instead.
-  const devboxStatus = devbox === null || isConnected ? null : devboxStatusLabel(devbox);
+  // A running box's forward comes back a few seconds after the app starts; only a lasting
+  // failure is worth the error.
+  const devboxStatus =
+    devbox === null || isConnected
+      ? null
+      : (devboxStatusLabel(devbox) ?? (connectionState.attempt <= 3 ? "Reconnecting…" : null));
   const diagnosis = resumingServerUpdate || devboxStatus !== null ? null : currentDiagnosis;
   const prepared = usePreparedConnection(environmentId);
   const connectedTarget = isConnected && prepared._tag === "Some" ? prepared.value.target : null;
