@@ -89,7 +89,18 @@ export type DevboxClaimState =
  * Sends shown as sent while their devbox wakes, by `devboxSendKey`: what the working row says
  * until the box connects and the message goes out.
  */
-export const devboxSendWaitsAtom = Atom.make<ReadonlyMap<string, string>>(new Map()).pipe(
+export interface DevboxSendWait {
+  /** What the working row says, such as "Waking shiny-pine…". */
+  readonly label: string;
+  readonly title: string;
+  /** The draft the send started from; its thread does not exist on the box yet. */
+  readonly draftId: string | null;
+  /** `environmentId:projectId`. */
+  readonly projectKey: string;
+  readonly createdAt: string;
+}
+
+export const devboxSendWaitsAtom = Atom.make<ReadonlyMap<string, DevboxSendWait>>(new Map()).pipe(
   Atom.keepAlive,
   Atom.withLabel("devboxes:send-waits"),
 );

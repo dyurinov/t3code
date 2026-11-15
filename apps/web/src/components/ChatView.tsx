@@ -1320,7 +1320,7 @@ export default function ChatView(props: ChatViewProps) {
   // A machine that can create devboxes offers one as another place to run.
   const devboxesAvailable = useDevboxes().available;
   const devboxSendWaitLabel =
-    useAtomValue(devboxSendWaitsAtom).get(devboxSendKey(environmentId, threadId)) ?? null;
+    useAtomValue(devboxSendWaitsAtom).get(devboxSendKey(environmentId, threadId))?.label ?? null;
   // Sending to a devbox that is not running wakes it, so the composer must not block it.
   const activeDevboxAsleep =
     useDevboxAsleep(activeEnvironment?.environmentId ?? null) && activeEnvironmentUnavailable;

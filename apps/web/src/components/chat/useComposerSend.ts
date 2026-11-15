@@ -66,6 +66,7 @@ import {
   devboxEnvironment,
   devboxForEnvironment,
   devboxSendKey,
+  type DevboxSendWait,
   devboxSendWaitsAtom,
   devboxClaimAtom,
   useDevboxes,
@@ -393,9 +394,15 @@ export function useComposerSend(input: ComposerSendInput) {
 
   const setDevboxSendWaits = useAtomSet(devboxSendWaitsAtom);
   /** Wakes the box if it sleeps and resolves once this client is connected to it again. */
-  const waitForDevbox = async (devbox: DevboxSummary, threadId: string) => {
+  const waitForDevbox = async (
+    devbox: DevboxSummary,
+    threadId: string,
+    shown: Omit<DevboxSendWait, "label">,
+  ) => {
     const key = devboxSendKey(environmentId, threadId);
-    setDevboxSendWaits((current) => new Map(current).set(key, `Waking ${devbox.name}…`));
+    setDevboxSendWaits((current) =>
+      new Map(current).set(key, { ...shown, label: `Waking ${devbox.name}…` }),
+    );
     if (devboxHostId !== null && (devbox.state === "stopped" || devbox.state === "failed"))
       void wakeDevbox({ environmentId: devboxHostId, input: { name: devbox.name } });
     // Waking takes about 90 seconds; give a slow start-up script room before giving up.
@@ -1328,7 +1335,12 @@ export function useComposerSend(input: ComposerSendInput) {
     let failure: AtomCommandResult<unknown, unknown> | null = null;
 
     if (sendWaitsForDevbox) {
-      const ready = await waitForDevbox(sleepingDevbox, threadIdForSend);
+      const ready = await waitForDevbox(sleepingDevbox, threadIdForSend, {
+        title,
+        draftId: isLocalDraftThread ? draftId : null,
+        projectKey: `${activeProject.environmentId}:${activeProject.id}`,
+        createdAt: messageCreatedAt,
+      });
       if (!ready) {
         const timedOut = await settlePromise(() =>
           Promise.reject(new Error(`${sleepingDevbox.name} did not come back in time.`)),
