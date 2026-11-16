@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off - Node's typed junction API avoids Windows symlink privileges while keeping the probe isolated.
 
+import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
@@ -2766,6 +2767,37 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
+/**
+ * SSH hosts download t3 from upstream's releases, which never carry the fork's own version: they
+ * run the newest upstream nightly whose commit this build contains.
+ */
+function resolveUpstreamServerVersion(): string | undefined {
+  try {
+    const releases = JSON.parse(
+      NodeChildProcess.execFileSync(
+        "gh",
+        ["release", "list", "-R", "pingdotgg/t3code", "--limit", "40", "--json", "tagName,name"],
+        { encoding: "utf8" },
+      ),
+    ) as ReadonlyArray<{ readonly tagName: string; readonly name: string }>;
+    for (const release of releases) {
+      const commit = /\(([0-9a-f]{7,40})\)/u.exec(release.name)?.[1];
+      if (commit === undefined) continue;
+      try {
+        NodeChildProcess.execFileSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], {
+          stdio: "ignore",
+        });
+        return release.tagName.replace(/^v/u, "");
+      } catch {
+        // Not in this build's history, or not fetched; try an older nightly.
+      }
+    }
+  } catch {
+    // No gh or no network: SSH hosts fall back to this build's own version.
+  }
+  return undefined;
+}
+
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
     ? "T3 Code Fork (Nightly)"
@@ -2787,6 +2819,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  upstreamServerVersion?: string,
 ) {
   const buildConfig: Record<string, unknown> = {
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
@@ -2847,6 +2880,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         // an upstream build over it.
         LSEnvironment: {
           T3CODE_DISABLE_AUTO_UPDATE: "1",
+          ...(upstreamServerVersion === undefined
+            ? {}
+            : { T3CODE_SSH_SERVER_VERSION: upstreamServerVersion }),
           // Always keep one prepared devbox, so New devbox starts at once.
           T3CODE_DEVBOX_SPARES: "1",
           // The codex on PATH is Asana's z wrapper, which needs a terminal's environment.
@@ -3954,6 +3990,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      options.platform === "mac" ? resolveUpstreamServerVersion() : undefined,
     ),
     dependencies: stageDependencies,
     devDependencies: {

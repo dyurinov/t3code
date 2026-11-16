@@ -45,6 +45,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly homeDirectory: string;
     readonly appDataDirectory: string;
     readonly userDataName?: string;
+    /** The t3 release SSH hosts run; this app's own version when unset. */
+    readonly sshServerVersion?: string;
     readonly baseDir: string;
     readonly stateDir: string;
     readonly desktopSettingsPath: string;
@@ -198,6 +200,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
     homeDirectory,
     appDataDirectory,
     ...(Option.isSome(config.userDataName) ? { userDataName: config.userDataName.value } : {}),
+    ...(Option.isSome(config.sshServerVersion)
+      ? { sshServerVersion: config.sshServerVersion.value }
+      : {}),
     baseDir,
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),

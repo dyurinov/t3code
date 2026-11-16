@@ -60,6 +60,8 @@ export const DesktopConfig = Config.all({
   disableAutoUpdate: optionalBoolean("T3CODE_DISABLE_AUTO_UPDATE"),
   // Lets a separately branded build keep its own Electron profile beside upstream's.
   userDataName: trimmedString("T3CODE_DESKTOP_USER_DATA_NAME"),
+  // A build whose own version is not on the release server names one that is, for SSH hosts.
+  sshServerVersion: trimmedString("T3CODE_SSH_SERVER_VERSION"),
   mockUpdates: optionalBoolean("T3CODE_DESKTOP_MOCK_UPDATES"),
   mockUpdateServerPort: Config.Port("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(
     Config.withDefault(3000),
