@@ -61,6 +61,7 @@ import {
   parsePairingToken,
   CoderBuild,
   devboxSpans,
+  goneFromCoder,
   hoursWithin,
   nextDevboxNumber,
   shownDevboxState,
@@ -1152,10 +1153,60 @@ const make = Effect.gen(function* () {
     Effect.catchCause((cause) => Effect.logWarning("devbox keep-awake failed", { cause })),
     Effect.repeat(Schedule.spaced(KEEP_ALIVE_INTERVAL)),
   );
+  // A box deleted outside T3 (Coder's dashboard, `coder delete`, a cleanup job) goes the way a
+  // delete here does, except that Coder already dropped the builds its cost came from.
+  const goneMisses = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
+  const forgetGone = Effect.fn("DevboxService.forgetGone")(function* (name: string) {
+    const record = (yield* Ref.get(records)).get(name);
+    if (record === undefined) return;
+    yield* FiberMap.remove(tunnels, name);
+    if (record.environmentId !== null)
+      yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
+    yield* pool.release(name);
+    const now = yield* Clock.currentTimeMillis;
+    yield* Ref.update(history, (current) => [
+      ...current.filter((box) => box.name !== name),
+      {
+        name,
+        ...(record.environmentId === null ? {} : { environmentId: record.environmentId }),
+        awake: [],
+        existed: [Date.parse(record.createdAt), now] as const,
+      },
+    ]);
+    yield* Ref.update(records, (current) => {
+      const next = new Map(current);
+      next.delete(name);
+      return next;
+    });
+    yield* setTransient(name, undefined);
+    yield* save();
+    yield* Effect.logInfo("devbox deleted outside T3", { name });
+  });
+  const reconcileWithCoder = Effect.fn("DevboxService.reconcileWithCoder")(function* (
+    all: ReadonlyMap<string, CoderWorkspace>,
+  ) {
+    const recorded = [...(yield* Ref.get(records)).keys()];
+    const creating = new Set(
+      yield* Effect.filter(recorded, (name) => FiberMap.has(creations, name)),
+    );
+    const result = goneFromCoder({
+      recorded,
+      listed: new Set(all.keys()),
+      creating,
+      misses: yield* Ref.get(goneMisses),
+      confirmations: 2,
+    });
+    yield* Ref.set(goneMisses, result.misses);
+    for (const name of result.gone) yield* locks.withLock(name, forgetGone(name));
+    if (result.gone.length > 0) yield* FiberSet.run(background, ensureSpares);
+  });
+
   // A running box left unconnected (a failed or interrupted setup, or one started outside
   // T3 after a sleep removed its forward) gets another try.
   const heal = Effect.gen(function* () {
+    // Only a list Coder answered counts; a failed `coder list` fails this pass instead.
     const all = yield* workspaces;
+    yield* reconcileWithCoder(all);
     for (const record of (yield* Ref.get(records)).values()) {
       if (all.get(record.name)?.latest_build.status !== "running") continue;
       if (yield* FiberMap.has(creations, record.name)) continue;

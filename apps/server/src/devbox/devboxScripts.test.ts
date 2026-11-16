@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   devboxSpans,
+  goneFromCoder,
   hoursWithin,
   nextDevboxNumber,
   shownDevboxState,
@@ -145,5 +146,30 @@ describe("shownDevboxState", () => {
     ["failed", "starting", "starting"],
   ] as const)("action %j with Coder %j shows %j", (transient, actual, shown) => {
     expect(shownDevboxState(transient, actual)).toBe(shown);
+  });
+});
+
+describe("goneFromCoder", () => {
+  const check = (misses: ReadonlyMap<string, number>, listed: ReadonlyArray<string>) =>
+    goneFromCoder({
+      recorded: ["kept", "vanished", "new"],
+      listed: new Set(listed),
+      creating: new Set(["new"]),
+      misses,
+      confirmations: 2,
+    });
+
+  it("drops a box only after two lists in a row miss it", () => {
+    const first = check(new Map(), ["kept"]);
+    expect(first.gone).toEqual([]);
+    expect([...first.misses]).toEqual([["vanished", 1]]);
+    expect(check(first.misses, ["kept"]).gone).toEqual(["vanished"]);
+  });
+
+  it("forgets a miss once the box shows up again, and never counts boxes being created", () => {
+    const first = check(new Map(), ["kept"]);
+    const back = check(first.misses, ["kept", "vanished"]);
+    expect(back.gone).toEqual([]);
+    expect(back.misses.size).toBe(0);
   });
 });

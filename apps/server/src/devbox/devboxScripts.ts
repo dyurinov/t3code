@@ -428,3 +428,26 @@ export function shownDevboxState(
   if (transient !== "failed") return transient;
   return actual === "stopped" || actual === "failed" || actual === "missing" ? "failed" : actual;
 }
+
+/**
+ * Which recorded boxes Coder no longer has. A box counts as gone only after `confirmations`
+ * successful lists in a row miss it, so one odd answer from Coder cannot drop a live box.
+ * Boxes being created are skipped: Coder lists them only once their first build starts.
+ */
+export function goneFromCoder(input: {
+  readonly recorded: ReadonlyArray<string>;
+  readonly listed: ReadonlySet<string>;
+  readonly creating: ReadonlySet<string>;
+  readonly misses: ReadonlyMap<string, number>;
+  readonly confirmations: number;
+}): { readonly gone: ReadonlyArray<string>; readonly misses: ReadonlyMap<string, number> } {
+  const misses = new Map<string, number>();
+  const gone: Array<string> = [];
+  for (const name of input.recorded) {
+    if (input.listed.has(name) || input.creating.has(name)) continue;
+    const count = (input.misses.get(name) ?? 0) + 1;
+    if (count >= input.confirmations) gone.push(name);
+    else misses.set(name, count);
+  }
+  return { gone, misses };
+}
