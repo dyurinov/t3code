@@ -1,12 +1,23 @@
 import { createDevboxEnvironmentAtoms } from "@t3tools/client-runtime/state/devboxes";
 import type { DevboxLoginPool, DevboxSummary, EnvironmentId } from "@t3tools/contracts";
+import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 import { usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentQuery } from "./query";
+import { useAtomCommand } from "./use-atom-command";
 
 export const devboxEnvironment = createDevboxEnvironmentAtoms(connectionAtomRuntime);
+
+/**
+ * Boxes this client asked to wake. Until the host's list moves them off `stopped`, they show as
+ * starting, so a list read from before the request cannot flash them back to asleep.
+ */
+const devboxWakeRequestsAtom = Atom.make<Readonly<Record<string, true>>>({}).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("devboxes:wake-requests"),
+);
 
 /** Devboxes live on the primary environment, which creates them and keeps their forwards. */
 export function useDevboxes(): {
@@ -14,9 +25,12 @@ export function useDevboxes(): {
   /** Whether the host can manage devboxes: its list answered, which needs the Coder CLI. */
   readonly available: boolean;
   readonly devboxes: ReadonlyArray<DevboxSummary>;
+  /** As the host reports them, before this client's pending wakes. */
+  readonly listedDevboxes: ReadonlyArray<DevboxSummary>;
   readonly pools: ReadonlyArray<DevboxLoginPool>;
   readonly refresh: () => void;
 } {
+  const wakeRequests = useAtomValue(devboxWakeRequestsAtom);
   const hostEnvironmentId = usePrimaryEnvironmentId();
   const query = useEnvironmentQuery(
     hostEnvironmentId === null
@@ -26,9 +40,50 @@ export function useDevboxes(): {
   return {
     hostEnvironmentId,
     available: query.data !== null,
-    devboxes: query.data?.devboxes ?? [],
+    listedDevboxes: query.data?.devboxes ?? [],
+    devboxes: (query.data?.devboxes ?? []).map((devbox) =>
+      devbox.state === "stopped" && wakeRequests[devbox.name] === true
+        ? { ...devbox, state: "starting" as const }
+        : devbox,
+    ),
     pools: query.data?.pools ?? [],
     refresh: query.refresh,
+  };
+}
+
+/** Wakes a box; it reads as starting from the click on, on every screen. */
+export function useWakeDevbox() {
+  const { hostEnvironmentId } = useDevboxes();
+  const wake = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
+  const setRequests = useAtomSet(devboxWakeRequestsAtom);
+  const forget = (name: string) =>
+    setRequests((current) => {
+      if (current[name] !== true) return current;
+      const { [name]: _forgotten, ...rest } = current;
+      return rest;
+    });
+  return async (name: string) => {
+    if (hostEnvironmentId === null) return null;
+    setRequests((current) => ({ ...current, [name]: true }));
+    const result = await wake({ environmentId: hostEnvironmentId, input: { name } });
+    if (result._tag === "Failure") forget(name);
+    return result;
+  };
+}
+
+/** Drops wake requests the host's list has caught up with, so a box that sleeps again shows it. */
+export function useSettleDevboxWakeRequests(listedDevboxes: ReadonlyArray<DevboxSummary>) {
+  const requests = useAtomValue(devboxWakeRequestsAtom);
+  const setRequests = useAtomSet(devboxWakeRequestsAtom);
+  const settled = Object.keys(requests).filter((name) => {
+    const devbox = listedDevboxes.find((entry) => entry.name === name);
+    return devbox === undefined || devbox.state !== "stopped";
+  });
+  return () => {
+    if (settled.length === 0) return;
+    setRequests((current) =>
+      Object.fromEntries(Object.entries(current).filter(([name]) => !settled.includes(name))),
+    );
   };
 }
 

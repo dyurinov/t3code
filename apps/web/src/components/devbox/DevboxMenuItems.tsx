@@ -4,7 +4,12 @@ import { useContext } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
 import { ensureLocalApi } from "../../localApi";
-import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
+import {
+  devboxEnvironment,
+  devboxForEnvironment,
+  useDevboxes,
+  useWakeDevbox,
+} from "../../state/devboxes";
 import { peerLinkEnvironment } from "../../state/peerLinks";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { MenuItem, MenuSeparator } from "../ui/menu";
@@ -15,7 +20,7 @@ export function DevboxMenuItems({ environmentId }: { readonly environmentId: Env
   const { hostEnvironmentId, devboxes } = useDevboxes();
   const devbox = devboxForEnvironment(devboxes, environmentId);
   const stop = useAtomCommand(devboxEnvironment.stop, { reportFailure: false });
-  const wake = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
+  const wake = useWakeDevbox();
   const remove = useAtomCommand(devboxEnvironment.remove, { reportFailure: false });
   const forget = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const registry = useContext(RegistryContext);
@@ -50,7 +55,13 @@ export function DevboxMenuItems({ environmentId }: { readonly environmentId: Env
           Sleep devbox
         </MenuItem>
       ) : (
-        <MenuItem onClick={() => void wake(target).then(report(`Could not wake ${devbox.name}`))}>
+        <MenuItem
+          onClick={() =>
+            void wake(devbox.name).then(
+              (result) => result && report(`Could not wake ${devbox.name}`)(result),
+            )
+          }
+        >
           Wake devbox
         </MenuItem>
       )}

@@ -25,7 +25,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { ServerUpdateAction, serverUpdateStageLabel } from "../ServerUpdateAction";
 import { useAutoBalanceUpdateBanner } from "./useAutoBalanceUpdateBanner";
-import { devboxEnvironment, devboxForEnvironment, useDevboxes } from "../../state/devboxes";
+import { devboxForEnvironment, useDevboxes, useWakeDevbox } from "../../state/devboxes";
 import { ComposerServerUpdateIcon } from "./ComposerServerUpdateStatus";
 import {
   dismissServerUpdateFailure,
@@ -74,9 +74,8 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
-  const { hostEnvironmentId: devboxHostId, devboxes, refresh: refreshDevboxes } = useDevboxes();
-  const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
-  const [wakingDevbox, setWakingDevbox] = useState(false);
+  const { devboxes } = useDevboxes();
+  const wakeDevbox = useWakeDevbox();
   const unavailableDevbox = devboxForEnvironment(
     devboxes,
     activeEnvironmentUnavailableState?.environmentId ?? null,
@@ -85,7 +84,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
   const devboxPhase =
     unavailableDevbox === null
       ? null
-      : wakingDevbox || unavailableDevbox.state === "starting"
+      : unavailableDevbox.state === "starting"
         ? "starting"
         : unavailableDevbox.state === "failed"
           ? "failed"
@@ -93,12 +92,8 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
             ? null
             : "sleeping";
   const handleWakeDevbox = async (name: string) => {
-    if (devboxHostId === null) return;
-    setWakingDevbox(true);
-    const woke = await wakeDevbox({ environmentId: devboxHostId, input: { name } });
-    setWakingDevbox(false);
-    refreshDevboxes();
-    if (woke._tag === "Failure") {
+    const woke = await wakeDevbox(name);
+    if (woke?._tag === "Failure") {
       if (!isAtomCommandInterrupted(woke)) {
         const error = squashAtomCommandFailure(woke);
         toastManager.add(
@@ -273,11 +268,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
           <>
             {unavailableDevbox !== null &&
             (devboxPhase === "sleeping" || devboxPhase === "failed") ? (
-              <Button
-                size="xs"
-                disabled={wakingDevbox}
-                onClick={() => void handleWakeDevboxStable(unavailableDevbox.name)}
-              >
+              <Button size="xs" onClick={() => void handleWakeDevboxStable(unavailableDevbox.name)}>
                 {devboxPhase === "failed" ? "Try again" : "Wake devbox"}
               </Button>
             ) : null}

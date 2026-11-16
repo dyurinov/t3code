@@ -5,7 +5,12 @@ import { useEffect } from "react";
 import { environmentCatalog } from "../../connection/catalog";
 import { connectPairing } from "../../connection/onboarding";
 import { clientHostEnvironmentAtom } from "../../state/clientHostEnvironment";
-import { devboxClaimAtom, devboxEnvironment, useDevboxes } from "../../state/devboxes";
+import {
+  devboxClaimAtom,
+  devboxEnvironment,
+  useDevboxes,
+  useSettleDevboxWakeRequests,
+} from "../../state/devboxes";
 import { useEnvironments } from "../../state/environments";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -25,7 +30,12 @@ const PROVIDER_RECHECK_DELAY_MS = 20_000;
  * loopback, so clients on another machine are skipped.
  */
 export function DevboxPairingCoordinator() {
-  const { hostEnvironmentId, available, devboxes, refresh } = useDevboxes();
+  const { hostEnvironmentId, available, devboxes, listedDevboxes, refresh } = useDevboxes();
+  const settleWakeRequests = useSettleDevboxWakeRequests(listedDevboxes);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops this client's wake requests once the host's list has caught up with them
+  useEffect(() => {
+    settleWakeRequests();
+  }, [settleWakeRequests]);
   const onHost = useAtomValue(clientHostEnvironmentAtom(hostEnvironmentId));
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();

@@ -61,6 +61,12 @@ vi.mock("effect/SynchronizedRef", async (importOriginal) => {
 
 // The server omits DOM types, which include TypeScript's WebAssembly declarations.
 
+const POWERSHELL_ARGS = [
+  "-NoLogo",
+  "-NoExit",
+  "-Command",
+  "[Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new()",
+];
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 class FakePtyProcess implements PtyAdapter.PtyProcess {
@@ -738,6 +744,39 @@ it.layer(
       yield* Deferred.await(restored);
       expect(process.resizeCalls.at(-1)).toEqual({ cols: 130, rows: 15 });
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    }),
+  );
+
+  // Every attached renderer answers the same query; a second DECRQM answer breaks Vim's input.
+  it.effect("lets one attached viewer answer terminal queries on a shared PTY", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const attach = (terminalId: string, viewerId: string) =>
+        manager.attachStream(openInput({ terminalId }), () => Effect.void, undefined, viewerId);
+      const stopFirst = yield* attach(DEFAULT_TERMINAL_ID, "first");
+      const stopSecond = yield* attach(DEFAULT_TERMINAL_ID, "second");
+      const stopOther = yield* attach("other", "second");
+      yield* Effect.addFinalizer(() => Effect.sync(() => (stopSecond(), stopOther())));
+      const [shared, other] = ptyAdapter.processes;
+      const modeReply = "\x1b[?12;2$y";
+      const write = (terminalId: string, viewerId: string, data: string, reply?: boolean) =>
+        manager.write(
+          { threadId: "thread-1", terminalId, data, ...(reply ? { reply } : {}) },
+          viewerId,
+        );
+
+      yield* write(DEFAULT_TERMINAL_ID, "first", modeReply, true);
+      yield* write(DEFAULT_TERMINAL_ID, "second", modeReply, true);
+      yield* write(DEFAULT_TERMINAL_ID, "second", "iHELLO");
+      yield* write("other", "second", modeReply, true);
+      expect(shared!.writes).toEqual([modeReply, "iHELLO"]);
+      expect(other!.writes).toEqual([modeReply]);
+
+      stopFirst();
+      yield* write(DEFAULT_TERMINAL_ID, "first", modeReply, true);
+      yield* write(DEFAULT_TERMINAL_ID, "second", modeReply, true);
+      yield* write(DEFAULT_TERMINAL_ID, "first", modeReply, true);
+      expect(shared!.writes).toEqual([modeReply, "iHELLO", modeReply]);
     }),
   );
 
@@ -2262,8 +2301,8 @@ it.layer(
         "pwsh.exe",
         "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
       ]);
-      expect(ptyAdapter.spawnInputs[1]?.args).toEqual(["-NoLogo"]);
-      expect(ptyAdapter.spawnInputs[2]?.args).toEqual(["-NoLogo"]);
+      expect(ptyAdapter.spawnInputs[1]?.args).toEqual(POWERSHELL_ARGS);
+      expect(ptyAdapter.spawnInputs[2]?.args).toEqual(POWERSHELL_ARGS);
     }),
   );
 
@@ -2700,7 +2739,7 @@ it.layer(
         ["win32", "C:\\Program Files\\Git\\bin\\bash.exe", undefined],
         ["darwin", "/bin/zsh", ["-o", "nopromptsp"]],
         ["linux", "/bin/zsh", ["-o", "nopromptsp"]],
-        ["win32", "pwsh.exe", ["-NoLogo"]],
+        ["win32", "pwsh.exe", POWERSHELL_ARGS],
       ] as const) {
         const { manager, ptyAdapter } = yield* createManager(5, {
           shellResolver: () => shell,

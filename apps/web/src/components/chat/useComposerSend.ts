@@ -63,15 +63,14 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { isProviderInstancePickerReady } from "../../providerInstances";
 import { useAtom, useAtomSet } from "@effect/atom-react";
 import {
-  devboxEnvironment,
   devboxForEnvironment,
   devboxSendKey,
   type DevboxSendWait,
   devboxSendWaitsAtom,
+  useWakeDevbox,
   devboxClaimAtom,
   useDevboxes,
 } from "../../state/devboxes";
-import { useAtomCommand } from "../../state/use-atom-command";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { newMessageId, newThreadId } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
@@ -189,6 +188,7 @@ interface ComposerSendInput {
   readonly activeThreadKey: string | null;
   readonly activeThreadBranch: string | null;
   readonly activeProject: EnvironmentProject | null;
+  readonly activeProjectIsScratch: boolean;
   readonly activeProjectDefaultModelSelection: ModelSelection | null;
   readonly activeMessageCount: number;
   readonly isServerThread: boolean;
@@ -289,6 +289,7 @@ export function useComposerSend(input: ComposerSendInput) {
     activeThreadKey,
     activeThreadBranch,
     activeProject,
+    activeProjectIsScratch,
     activeProjectDefaultModelSelection,
     activeMessageCount,
     isServerThread,
@@ -382,7 +383,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
   const [devboxClaim, setDevboxClaim] = useAtom(devboxClaimAtom);
-  const wakeDevbox = useAtomCommand(devboxEnvironment.wake, { reportFailure: false });
+  const wakeDevbox = useWakeDevbox();
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
   const pendingApprovalsRef = useRef(pendingApprovals);
   const respondingRequestIdsRef = useRef(respondingRequestIds);
@@ -404,7 +405,7 @@ export function useComposerSend(input: ComposerSendInput) {
       new Map(current).set(key, { ...shown, label: `Waking ${devbox.name}…` }),
     );
     if (devboxHostId !== null && (devbox.state === "stopped" || devbox.state === "failed"))
-      void wakeDevbox({ environmentId: devboxHostId, input: { name: devbox.name } });
+      void wakeDevbox(devbox.name);
     // Waking takes about 90 seconds; give a slow start-up script room before giving up.
     const deadline = Date.now() + 6 * 60_000;
     try {
@@ -508,7 +509,7 @@ export function useComposerSend(input: ComposerSendInput) {
           description: "Your message sends when it is back, in about 2 minutes.",
         }),
       );
-      void wakeDevbox({ environmentId: devboxHostId, input: { name: sleepingDevbox.name } });
+      void wakeDevbox(sleepingDevbox.name);
       return;
     }
     // A box down since this page loaded has reported neither its scopes nor its thread yet; the
@@ -750,6 +751,7 @@ export function useComposerSend(input: ComposerSendInput) {
           replyTo,
         },
         setThreadError,
+        { dispatchMode, submissionIntent },
       );
       return;
     }
@@ -906,6 +908,7 @@ export function useComposerSend(input: ComposerSendInput) {
       sendEnvMode,
       worktreePath: activeThread.worktreePath,
       activeThreadBranch,
+      isScratchProject: activeProjectIsScratch,
       resumeCompactionTokens,
       keepFullHistory,
       phase,
