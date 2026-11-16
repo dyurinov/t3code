@@ -2671,8 +2671,8 @@ export const layerWsRpc = (
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
         [WS_METHODS.devboxesList]: (_input) =>
-          Effect.all([devboxes.list, devboxes.pools]).pipe(
-            Effect.map(([list, pools]) => ({ devboxes: list, pools })),
+          Effect.all([devboxes.list, devboxes.pools, devboxes.deleted]).pipe(
+            Effect.map(([list, pools, deleted]) => ({ devboxes: list, pools, deleted })),
           ),
         [WS_METHODS.devboxesCreate]: (input) => devboxes.create(input),
         [WS_METHODS.devboxesWake]: ({ name }) => devboxes.wake(name),

@@ -23,8 +23,8 @@ const withService = <A>(
 export const layer = McpToolAccess.toLayer(DevboxToolkit, {
   devbox_list: McpToolAccess.reads(() =>
     withService((service) =>
-      Effect.all([service.list, service.pools]).pipe(
-        Effect.map(([devboxes, pools]) => ({ devboxes, pools })),
+      Effect.all([service.list, service.pools, service.deleted]).pipe(
+        Effect.map(([devboxes, pools, deleted]) => ({ devboxes, pools, deleted })),
       ),
     ),
   ),

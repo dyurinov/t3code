@@ -9,6 +9,7 @@ import * as NodeOS from "node:os";
 import {
   DevboxError,
   EnvironmentId as EnvironmentIdSchema,
+  type DeletedDevbox,
   type DevboxClientPairing,
   type DevboxCreateInput,
   type DevboxLoginPool,
@@ -88,12 +89,13 @@ const DevboxRecord = Schema.Struct({
 });
 type DevboxRecord = typeof DevboxRecord.Type;
 const Span = Schema.Tuple([Schema.Number, Schema.Number]);
-const DeletedDevbox = Schema.Struct({
+const DeletedDevboxRecord = Schema.Struct({
   name: Schema.String,
+  environmentId: Schema.optionalKey(Schema.String),
   awake: Schema.Array(Span),
   existed: Span,
 });
-type DeletedDevbox = typeof DeletedDevbox.Type;
+type DeletedDevboxRecord = typeof DeletedDevboxRecord.Type;
 const decodeBuilds = Schema.decodeUnknownEffect(Schema.Array(CoderBuild));
 const decodeWhoami = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Array(Schema.Struct({ url: Schema.String }))),
@@ -109,7 +111,7 @@ const DevboxFile = Schema.Struct({
   /** The number the next box gets; numbers are never reused, even after a delete. */
   nextNumber: Schema.optionalKey(Schema.Number),
   /** Deleted boxes' running and lifetime spans; Coder forgets a box's builds once it is gone. */
-  history: Schema.optionalKey(Schema.Array(DeletedDevbox)),
+  history: Schema.optionalKey(Schema.Array(DeletedDevboxRecord)),
 });
 const decodeFile = Schema.decodeUnknownEffect(Schema.fromJsonString(DevboxFile));
 const encodeFile = Schema.encodeEffect(Schema.fromJsonString(DevboxFile));
@@ -168,6 +170,8 @@ export class DevboxService extends Context.Service<
     readonly claim: Effect.Effect<DevboxClientPairing & { readonly name: string }, DevboxError>;
     /** A one-time code for a client to connect to the box at its loopback URL. */
     readonly pairClient: (name: string) => Effect.Effect<DevboxClientPairing, DevboxError>;
+    /** Boxes T3 deleted, so every client can drop its saved environment for them. */
+    readonly deleted: Effect.Effect<ReadonlyArray<DeletedDevbox>>;
     /** Each box's running and stopped time inside the window, with an estimated cost. */
     readonly usage: (input: DevboxUsageInput) => Effect.Effect<DevboxUsageResult, DevboxError>;
     /** The devbox an environment id belongs to, if any. */
@@ -214,7 +218,7 @@ const make = Effect.gen(function* () {
     .pipe(Effect.ignore);
   const records = yield* Ref.make<ReadonlyMap<string, DevboxRecord>>(new Map());
   const nextNumber = yield* Ref.make<number | undefined>(undefined);
-  const history = yield* Ref.make<ReadonlyArray<DeletedDevbox>>([]);
+  const history = yield* Ref.make<ReadonlyArray<DeletedDevboxRecord>>([]);
   const transient = yield* Ref.make<ReadonlyMap<string, Transient>>(new Map());
   const locks = yield* KeyedLock.make<string>();
   const tunnels = yield* FiberMap.make<string>();
@@ -775,7 +779,7 @@ const make = Effect.gen(function* () {
           if (record.environmentId !== null)
             yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
           if (workspace !== undefined) {
-            yield* rememberDeleted(name).pipe(
+            yield* rememberDeleted(name, record.environmentId).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("devbox usage could not be kept", { name, cause }),
               ),
@@ -1060,7 +1064,10 @@ const make = Effect.gen(function* () {
     },
   );
   /** Keeps a box's spans before Coder forgets them with the box. */
-  const rememberDeleted = Effect.fn("DevboxService.rememberDeleted")(function* (name: string) {
+  const rememberDeleted = Effect.fn("DevboxService.rememberDeleted")(function* (
+    name: string,
+    environmentId: string | null,
+  ) {
     const workspace = (yield* workspaces).get(name);
     if (workspace?.id === undefined) return;
     const builds = yield* buildsSince(workspace.id, 0);
@@ -1069,9 +1076,23 @@ const make = Effect.gen(function* () {
     const existed = spans.existed;
     yield* Ref.update(history, (current) => [
       ...current.filter((box) => box.name !== name),
-      { name, awake: spans.awake, existed },
+      {
+        name,
+        ...(environmentId === null ? {} : { environmentId }),
+        awake: spans.awake,
+        existed,
+      },
     ]);
   });
+
+  const deleted: DevboxService["Service"]["deleted"] = Ref.get(history).pipe(
+    Effect.map((boxes) =>
+      boxes.map((box) => ({
+        name: box.name,
+        environmentId: (box.environmentId ?? null) as EnvironmentId | null,
+      })),
+    ),
+  );
 
   const byEnvironment: DevboxService["Service"]["byEnvironment"] = (environmentId) =>
     Ref.get(records).pipe(
@@ -1180,6 +1201,7 @@ const make = Effect.gen(function* () {
     claim,
     pairClient,
     usage,
+    deleted,
     byEnvironment,
   });
 });

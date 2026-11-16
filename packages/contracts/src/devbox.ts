@@ -110,9 +110,18 @@ export const DevboxSubmitLoginCodeInput = Schema.Struct({
 });
 export type DevboxSubmitLoginCodeInput = typeof DevboxSubmitLoginCodeInput.Type;
 
+/** A box T3 deleted; clients drop their saved environment for it. */
+export const DeletedDevbox = Schema.Struct({
+  name: Schema.String,
+  /** Unknown for boxes deleted before this was recorded. */
+  environmentId: Schema.NullOr(EnvironmentId),
+});
+export type DeletedDevbox = typeof DeletedDevbox.Type;
+
 export const DevboxListResult = Schema.Struct({
   devboxes: Schema.Array(DevboxSummary),
   pools: Schema.Array(DevboxLoginPool),
+  deleted: Schema.Array(DeletedDevbox),
 });
 export type DevboxListResult = typeof DevboxListResult.Type;
 

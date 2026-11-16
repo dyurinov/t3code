@@ -19,6 +19,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 const attempted = new Set<EnvironmentId>();
 // Boxes seen down; their provider status is from boot and gets checked again once they answer.
 const woken = new Set<EnvironmentId>();
+// Saved environments of deleted boxes this page already removed.
+const forgotten = new Set<EnvironmentId>();
 // Each box's sign-in states as last seen, to notice the host installing one.
 const credentialsSeen = new Map<EnvironmentId, string>();
 // A box just up is still running its startup script, which can starve the provider probe.
@@ -30,7 +32,8 @@ const PROVIDER_RECHECK_DELAY_MS = 20_000;
  * loopback, so clients on another machine are skipped.
  */
 export function DevboxPairingCoordinator() {
-  const { hostEnvironmentId, available, devboxes, listedDevboxes, refresh } = useDevboxes();
+  const { hostEnvironmentId, available, devboxes, listedDevboxes, deleted, refresh } =
+    useDevboxes();
   const settleWakeRequests = useSettleDevboxWakeRequests(listedDevboxes);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops this client's wake requests once the host's list has caught up with them
   useEffect(() => {
@@ -116,6 +119,25 @@ export function DevboxPairingCoordinator() {
       });
     }
   }, [devboxes, refreshProviders]);
+
+  const forgetEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
+  // A box deleted from another window leaves this one's saved environment retrying forever.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- removes saved environments for boxes the host deleted
+  useEffect(() => {
+    if (!catalog.isReady || deleted.length === 0) return;
+    for (const environment of environments) {
+      if (forgotten.has(environment.environmentId)) continue;
+      const gone = deleted.some((box) =>
+        box.environmentId !== null
+          ? box.environmentId === environment.environmentId
+          : // Recorded before ids were kept: match by name, only while it fails to answer.
+            box.name === environment.label && environment.connection.phase !== "connected",
+      );
+      if (!gone) continue;
+      forgotten.add(environment.environmentId);
+      void forgetEnvironment(environment.environmentId);
+    }
+  }, [catalog, deleted, environments, forgetEnvironment]);
 
   return null;
 }

@@ -1,5 +1,10 @@
 import { createDevboxEnvironmentAtoms } from "@t3tools/client-runtime/state/devboxes";
-import type { DevboxLoginPool, DevboxSummary, EnvironmentId } from "@t3tools/contracts";
+import type {
+  DeletedDevbox,
+  DevboxLoginPool,
+  DevboxSummary,
+  EnvironmentId,
+} from "@t3tools/contracts";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
@@ -28,6 +33,8 @@ export function useDevboxes(): {
   /** As the host reports them, before this client's pending wakes. */
   readonly listedDevboxes: ReadonlyArray<DevboxSummary>;
   readonly pools: ReadonlyArray<DevboxLoginPool>;
+  /** Boxes T3 deleted; their saved environments are dead ends. */
+  readonly deleted: ReadonlyArray<DeletedDevbox>;
   readonly refresh: () => void;
 } {
   const wakeRequests = useAtomValue(devboxWakeRequestsAtom);
@@ -47,6 +54,7 @@ export function useDevboxes(): {
         : devbox,
     ),
     pools: query.data?.pools ?? [],
+    deleted: query.data?.deleted ?? [],
     refresh: query.refresh,
   };
 }
