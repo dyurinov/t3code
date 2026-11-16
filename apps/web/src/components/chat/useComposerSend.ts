@@ -167,6 +167,21 @@ function readEnvironmentPresentation(environmentId: EnvironmentId) {
   return appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId);
 }
 
+async function waitForDevboxConnection(environmentId: EnvironmentId) {
+  // Waking takes about 90 seconds; give a slow start-up script room before giving up.
+  const deadline = Date.now() + 6 * 60_000;
+  while (Date.now() < deadline) {
+    // Scopes land a moment after the socket; uploads refuse to start until they do.
+    if (
+      readEnvironmentPresentation(environmentId)?.connection.phase === "connected" &&
+      readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+    )
+      return true;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  return false;
+}
+
 function draftHasNonPromptContent(target: ComposerThreadTarget) {
   const draft = useComposerDraftStore.getState().getComposerDraft(target);
   return draft ? composerDraftHasUserContent({ ...draft, prompt: "" }) : false;
@@ -406,26 +421,13 @@ export function useComposerSend(input: ComposerSendInput) {
     );
     if (devboxHostId !== null && (devbox.state === "stopped" || devbox.state === "failed"))
       void wakeDevbox(devbox.name);
-    // Waking takes about 90 seconds; give a slow start-up script room before giving up.
-    const deadline = Date.now() + 6 * 60_000;
-    try {
-      while (Date.now() < deadline) {
-        // Scopes land a moment after the socket; uploads refuse to start until they do.
-        if (
-          readEnvironmentPresentation(environmentId)?.connection.phase === "connected" &&
-          readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
-        )
-          return true;
-        await new Promise((resolve) => setTimeout(resolve, 1_500));
-      }
-      return false;
-    } finally {
+    return waitForDevboxConnection(environmentId).finally(() => {
       setDevboxSendWaits((current) => {
         const next = new Map(current);
         next.delete(key);
         return next;
       });
-    }
+    });
   };
 
   const onSend = async (
