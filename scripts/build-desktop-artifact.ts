@@ -2842,11 +2842,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       extendInfo: {
-        // The private fork runs beside upstream T3 Code: its own home and Electron profile,
-        // and no self-updates, which would install an upstream build over it.
+        // The private fork replaces upstream T3 Code on this machine, on the same home and
+        // Electron profile; run one or the other. It never self-updates, which would install
+        // an upstream build over it.
         LSEnvironment: {
-          T3CODE_HOME: `${NodeOS.homedir()}/.t3-fork`,
-          T3CODE_DESKTOP_USER_DATA_NAME: "t3code-fork",
           T3CODE_DISABLE_AUTO_UPDATE: "1",
           // Always keep one prepared devbox, so New devbox starts at once.
           T3CODE_DEVBOX_SPARES: "1",
