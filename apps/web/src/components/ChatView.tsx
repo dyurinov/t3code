@@ -695,7 +695,15 @@ export default function ChatView(props: ChatViewProps) {
     optimisticBlobPreviews.handOff(optimisticState);
     setHeldOptimisticUserMessages(optimisticState);
   }
-  const optimisticUserMessages = optimisticState.messages;
+  const devboxSendWait =
+    useAtomValue(devboxSendWaitsAtom).get(devboxSendKey(environmentId, threadId)) ?? null;
+  // A send waiting on its devbox outlives this view, which may have been left and reopened.
+  const optimisticUserMessages =
+    devboxSendWait === null ||
+    serverAcknowledgedUserMessageIds.has(devboxSendWait.message.id) ||
+    optimisticState.messages.some((message) => message.id === devboxSendWait.message.id)
+      ? optimisticState.messages
+      : [...optimisticState.messages, devboxSendWait.message];
   const setOptimisticUserMessages = (action: SetStateAction<ChatMessage[]>) =>
     setHeldOptimisticUserMessages((state) =>
       applyOptimisticUserMessagesAction(state, threadId, action),
@@ -1319,8 +1327,7 @@ export default function ChatView(props: ChatViewProps) {
   // messages, so it would otherwise be offered a machine picker that does nothing.
   // A machine that can create devboxes offers one as another place to run.
   const devboxesAvailable = useDevboxes().available;
-  const devboxSendWaitLabel =
-    useAtomValue(devboxSendWaitsAtom).get(devboxSendKey(environmentId, threadId))?.label ?? null;
+  const devboxSendWaitLabel = devboxSendWait?.label ?? null;
   // Sending to a devbox that is not running wakes it, so the composer must not block it.
   const activeDevboxAsleep =
     useDevboxAsleep(activeEnvironment?.environmentId ?? null) && activeEnvironmentUnavailable;

@@ -9,6 +9,7 @@ import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import type { ChatMessage } from "../types";
 import { createDevboxClaims, type DevboxClaimState } from "./devboxClaims";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -159,6 +160,8 @@ export interface DevboxSendWait {
   /** `environmentId:projectId`. */
   readonly projectKey: string;
   readonly createdAt: string;
+  /** The sent message, so the thread shows it even after its view was left and reopened. */
+  readonly message: ChatMessage;
 }
 
 export const devboxSendWaitsAtom = Atom.make<ReadonlyMap<string, DevboxSendWait>>(new Map()).pipe(

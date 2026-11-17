@@ -76,6 +76,7 @@ import {
   useDevboxClaim,
   useDevboxes,
 } from "../../state/devboxes";
+import { followDevboxWake } from "../../state/devboxWake";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { newMessageId, newThreadId } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
@@ -172,19 +173,27 @@ function readEnvironmentPresentation(environmentId: EnvironmentId) {
   return appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId);
 }
 
-async function waitForDevboxConnection(environmentId: EnvironmentId) {
+/** Resolves `null` once connected, or why the box will not come back. */
+async function waitForDevboxConnection(
+  environmentId: EnvironmentId,
+  readDevbox: () => DevboxSummary | null,
+): Promise<string | null> {
   // Waking takes about 90 seconds; give a slow start-up script room before giving up.
   const deadline = Date.now() + 6 * 60_000;
+  let woke = false;
   while (Date.now() < deadline) {
     // Scopes land a moment after the socket; uploads refuse to start until they do.
     if (
       readEnvironmentPresentation(environmentId)?.connection.phase === "connected" &&
       readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
     )
-      return true;
+      return null;
+    const followed = followDevboxWake(woke, readDevbox());
+    if (followed.failure !== null) return followed.failure;
+    woke = followed.woke;
     await new Promise((resolve) => setTimeout(resolve, 1_500));
   }
-  return false;
+  return "The devbox did not come back in time.";
 }
 
 function draftHasNonPromptContent(target: ComposerThreadTarget) {
@@ -412,7 +421,13 @@ export function useComposerSend(input: ComposerSendInput) {
   }, [pendingApprovals, respondingRequestIds]);
 
   const setDevboxSendWaits = useAtomSet(devboxSendWaitsAtom);
-  /** Wakes the box if it sleeps and resolves once this client is connected to it again. */
+  // A waiting send reads the host's latest list, which polls while a box changes state.
+  const devboxesRef = useRef(devboxes);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors the host's devbox list into a ref an async wait reads between polls
+  useLayoutEffect(() => {
+    devboxesRef.current = devboxes;
+  }, [devboxes]);
+  /** Wakes the box if it sleeps; resolves `null` once connected again, else why not. */
   const waitForDevbox = async (
     devbox: DevboxSummary,
     threadId: string,
@@ -424,7 +439,9 @@ export function useComposerSend(input: ComposerSendInput) {
     );
     if (devboxHostId !== null && (devbox.state === "stopped" || devbox.state === "failed"))
       void wakeDevbox(devbox.name);
-    return waitForDevboxConnection(environmentId).finally(() => {
+    const readDevbox = () =>
+      devboxesRef.current.find((entry) => entry.name === devbox.name) ?? null;
+    return waitForDevboxConnection(environmentId, readDevbox).finally(() => {
       setDevboxSendWaits((current) => {
         const next = new Map(current);
         next.delete(key);
@@ -1358,6 +1375,7 @@ export function useComposerSend(input: ComposerSendInput) {
         draftId,
         projectKey: `${activeProject.environmentId}:${activeProject.id}`,
         createdAt: messageCreatedAt,
+        message: optimisticMessage,
       };
       const progress = (label: string) =>
         setDevboxSendWaits((current) => new Map(current).set(waitKey, { ...shown, label }));
@@ -1461,17 +1479,16 @@ export function useComposerSend(input: ComposerSendInput) {
     }
 
     if (sendWaitsForDevbox) {
-      const ready = await waitForDevbox(sleepingDevbox, threadIdForSend, {
+      const notBack = await waitForDevbox(sleepingDevbox, threadIdForSend, {
         title,
         draftId: isLocalDraftThread ? draftId : null,
         projectKey: `${activeProject.environmentId}:${activeProject.id}`,
         createdAt: messageCreatedAt,
+        message: optimisticMessage,
       });
-      if (!ready) {
-        const timedOut = await settlePromise(() =>
-          Promise.reject(new Error(`${sleepingDevbox.name} did not come back in time.`)),
-        );
-        if (timedOut._tag === "Failure") failure = timedOut;
+      if (notBack !== null) {
+        const rejected = await settlePromise(() => Promise.reject(new Error(notBack)));
+        if (rejected._tag === "Failure") failure = rejected;
       } else if (uploadsWaitForDevbox) {
         startAttachmentUploads();
         turnAttachmentsPromise = prepareAttachments();
