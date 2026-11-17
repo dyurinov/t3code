@@ -35,6 +35,13 @@ export const DevboxSummary = Schema.Struct({
   /** When Coder stops the box unless a running turn extends it. */
   deadline: Schema.NullOr(Schema.String),
   credentials: Schema.Struct({ claude: DevboxCredentialState, codex: DevboxCredentialState }),
+  loginRequired: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        settingsUrl: Schema.Literal("/settings/devboxes"),
+      }),
+    ),
+  ),
   lastError: Schema.NullOr(Schema.String),
 });
 export type DevboxSummary = typeof DevboxSummary.Type;
@@ -55,13 +62,12 @@ export class DevboxError extends Schema.TaggedError<DevboxError>()("DevboxError"
 export const DevboxCreateInput = Schema.Struct({
   task: Schema.optionalKey(
     TrimmedNonEmptyString.annotate({
-      description: "What the box is for. Names the box when `name` is omitted.",
+      description: "What the box is for.",
     }),
   ),
   name: Schema.optionalKey(
     TrimmedNonEmptyString.annotate({
-      description:
-        "Box name; lowercase letters, digits and hyphens. Derived from `task` if omitted.",
+      description: "Preferred name for a fresh box; a claimed spare keeps its existing name.",
     }),
   ),
   branch: Schema.optionalKey(

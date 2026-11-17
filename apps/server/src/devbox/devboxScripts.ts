@@ -88,36 +88,65 @@ export function parsePairingToken(stdout: string): string | undefined {
 const REMOTE_T3_PORT = 3773;
 export { REMOTE_T3_PORT };
 
-/**
- * Runs on the box as `sh -s -- <version|latest-nightly> <name>`: installs that T3 release, runs it as a systemd
- * user service (boxes linger, so it outlives SSH sessions and this machine's server), names the
- * environment after the box, and waits until it answers. Mirrors the archive install in
- * packages/ssh/src/tunnel.ts.
- */
-export const PROVISION_SCRIPT = String.raw`set -eu
+/** Runs on a box as `sh -s -- <version|latest-nightly> <name>`, installing a verified release. */
+export const INSTALL_T3_SCRIPT = String.raw`set -eu
 version=$1
 name=$2
 CODEZ_DIR=/var/asana-config/asana
-if [ "$version" = latest-nightly ]; then
-  version=$(curl -fsSL --connect-timeout 30 "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=20" | python3 -c '
-import json, sys
-for release in json.load(sys.stdin):
-    tag = release["tag_name"]
-    if "nightly" in tag and any(a["name"].endswith("-linux-x64.tar.gz") for a in release.get("assets", [])):
-        print(tag.lstrip("v"))
-        break
-')
-  [ -n "$version" ] || { echo "No nightly T3 release with a linux-x64 build found" >&2; exit 1; }
-fi
+metadata=$(mktemp -d)
+staging=
+trap 'rm -rf "$metadata"; if [ -n "$staging" ]; then rm -rf "$staging"; fi' EXIT
+fetch() {
+  if ! http_status=$(curl -sSL --connect-timeout 30 --max-time "$3" -H "Accept: $4" --output "$2" --write-out '%{http_code}' "$1"); then return 1; fi
+  case "$http_status" in 2??) return 0 ;; esac
+  printf 'Download failed (HTTP %s): %s\n' "$http_status" "$1" >&2
+  head -c 2000 "$2" >&2
+  printf '\n' >&2
+  return 1
+}
+select_release() {
+  if [ "$version" = latest-nightly ]; then
+    release_url='https://api.github.com/repos/pingdotgg/t3code/releases?per_page=20'
+  else
+    release_url="https://api.github.com/repos/pingdotgg/t3code/releases/tags/v$version"
+  fi
+  fetch "$release_url" "$metadata/release.json" 60 application/vnd.github+json || return 1
+  python3 - "$metadata" "$version" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+requested = sys.argv[2]
+try:
+    payload = json.loads((root / "release.json").read_text())
+except (ValueError, OSError):
+    raise SystemExit("GitHub release metadata was not valid JSON.")
+for release in payload if isinstance(payload, list) else [payload]:
+    tag = release.get("tag_name", "")
+    version = tag.removeprefix("v")
+    if requested == "latest-nightly" and "nightly" not in tag:
+        continue
+    if requested != "latest-nightly" and requested != version:
+        continue
+    assets = {asset["name"]: asset for asset in release.get("assets", [])}
+    archive = f"t3-{version}-linux-x64.tar.gz"
+    if "SHA256SUMS" not in assets or archive not in assets:
+        continue
+    (root / "version").write_text(version)
+    for filename, name in [("checksums-url", "SHA256SUMS"), ("archive-url", archive)]:
+        (root / filename).write_text(f'https://api.github.com/repos/pingdotgg/t3code/releases/assets/{assets[name]["id"]}')
+    break
+else:
+    raise SystemExit("No T3 release with linux-x64 and SHA256SUMS assets found.")
+PY
+}
+if [ "$version" = latest-nightly ]; then select_release; version=$(cat "$metadata/version"); fi
 dir="$HOME/.t3/runtime/versions/$version"
 if [ "$(cat "$dir/.install-complete" 2>/dev/null)" != "$version" ] || [ ! -x "$dir/t3" ]; then
-  base=https://github.com/pingdotgg/t3code/releases/download/v$version
+  [ -f "$metadata/version" ] || select_release
   archive=t3-$version-linux-x64.tar.gz
   mkdir -p "$HOME/.t3/runtime/versions"
   staging=$(mktemp -d "$HOME/.t3/runtime/versions/.staging-XXXXXX")
-  trap 'rm -rf "$staging"' EXIT
-  curl -fsSL --connect-timeout 30 --max-time 60 "$base/SHA256SUMS" -o "$staging/SHA256SUMS"
-  curl -fsSL --connect-timeout 30 --max-time 600 "$base/$archive" -o "$staging/$archive"
+  fetch "$(cat "$metadata/checksums-url")" "$staging/SHA256SUMS" 60 application/octet-stream
+  fetch "$(cat "$metadata/archive-url")" "$staging/$archive" 600 application/octet-stream
   expected=$(grep " \*\{0,1\}$archive$" "$staging/SHA256SUMS" | cut -d" " -f1)
   actual=$(sha256sum "$staging/$archive" | cut -d" " -f1)
   [ -n "$expected" ] && [ "$actual" = "$expected" ] || { echo "checksum mismatch for $archive" >&2; exit 1; }
@@ -127,10 +156,13 @@ if [ "$(cat "$dir/.install-complete" 2>/dev/null)" != "$version" ] || [ ! -x "$d
   printf "%s\n" "$version" >"$staging/.install-complete"
   rm -rf "$dir"
   mv "$staging" "$dir"
-  trap - EXIT
 fi
 ln -sfn "$dir" "$HOME/.t3/runtime/current"
-sudo -n hostnamectl set-hostname --pretty "$name" 2>/dev/null || true
+`;
+
+export const PROVISION_SCRIPT =
+  INSTALL_T3_SCRIPT +
+  String.raw`sudo -n hostnamectl set-hostname --pretty "$name" 2>/dev/null || true
 unit="$HOME/.config/systemd/user/t3code.service"
 mkdir -p "$(dirname "$unit")"
 cat >"$unit.new" <<UNIT
@@ -190,6 +222,79 @@ export const PAIR_SCRIPT = String.raw`set -eu
 "$HOME/.t3/runtime/current/t3" pair --base-dir "$HOME/.t3" --ttl 5m --label "$1"
 `;
 
+/** Prints, as the last line, a 5-minute bearer token that may list and change the box's links. */
+const LINK_TOKEN = String.raw`"$HOME/.t3/runtime/current/t3" auth session issue --base-dir "$HOME/.t3" --scope access:read --scope access:write --ttl 5m --label "T3 devbox links" --token-only
+`;
+
+/**
+ * Runs on a box as `sh -s -- <sibling> <port>`: the sibling's T3 server answers at
+ * 127.0.0.1:<port>. The Coder tunnel starts on the first connection and stops after 15 idle
+ * minutes, so links to every sibling cost nothing until a delegation uses one. Ends with
+ * LINK_TOKEN.
+ */
+export const SIBLING_SCRIPT =
+  String.raw`set -eu
+peer=$1
+port=$2
+tunnel=$((port + 10000))
+coder_bin=$(command -v coder || echo /var/lib/coder-agent/coder)
+proxyd=$(ls /lib/systemd/systemd-socket-proxyd /usr/lib/systemd/systemd-socket-proxyd 2>/dev/null | head -n 1)
+dir="$HOME/.config/systemd/user"
+unit="t3-peer-$peer"
+mkdir -p "$dir"
+cat >"$dir/$unit.socket.new" <<UNIT
+[Unit]
+Description=T3 Code link to $peer
+
+[Socket]
+ListenStream=127.0.0.1:$port
+
+[Install]
+WantedBy=sockets.target
+UNIT
+cat >"$dir/$unit.service.new" <<UNIT
+[Unit]
+Requires=$unit-tunnel.service
+After=$unit-tunnel.service
+
+[Service]
+ExecStart=$proxyd --exit-idle-time=15min 127.0.0.1:$tunnel
+UNIT
+cat >"$dir/$unit-tunnel.service.new" <<UNIT
+[Unit]
+StopWhenUnneeded=yes
+
+[Service]
+ExecStart=$coder_bin port-forward $peer --tcp 127.0.0.1:$tunnel:${REMOTE_T3_PORT} --disable-autostart=true
+ExecStartPost=/bin/bash -c 'for _ in \$(seq 1 150); do (exec 3<>/dev/tcp/127.0.0.1/$tunnel) 2>/dev/null && exit 0; sleep 0.1; done; exit 1'
+UNIT
+changed=0
+for file in "$unit.socket" "$unit.service" "$unit-tunnel.service"; do
+  if cmp -s "$dir/$file.new" "$dir/$file"; then rm -f "$dir/$file.new"; else mv "$dir/$file.new" "$dir/$file"; changed=1; fi
+done
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+if [ "$changed" = 1 ]; then
+  systemctl --user daemon-reload
+  systemctl --user stop "$unit.service" "$unit-tunnel.service" 2>/dev/null || true
+  systemctl --user enable "$unit.socket" >/dev/null 2>&1
+  systemctl --user restart "$unit.socket"
+else
+  systemctl --user enable --now "$unit.socket" >/dev/null 2>&1
+fi
+` + LINK_TOKEN;
+
+/** Runs on a box as `sh -s -- <sibling>`: removes what SIBLING_SCRIPT set up. Ends with LINK_TOKEN. */
+export const SIBLING_REMOVE_SCRIPT =
+  String.raw`set -eu
+unit="t3-peer-$1"
+dir="$HOME/.config/systemd/user"
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+systemctl --user disable --now "$unit.socket" >/dev/null 2>&1 || true
+systemctl --user stop "$unit.service" "$unit-tunnel.service" 2>/dev/null || true
+rm -f "$dir/$unit.socket" "$dir/$unit.service" "$dir/$unit-tunnel.service"
+systemctl --user daemon-reload
+` + LINK_TOKEN;
+
 /**
  * Reads a JSON payload on stdin and writes the logins it carries, owner-only:
  * `claude` → ~/.claude/.credentials.json plus the account in ~/.claude.json,
@@ -214,6 +319,36 @@ if payload.get("codex"):
     with open(f"{home}/.codex/auth.json", "w") as f:
         f.write(payload["codex"])
 print("installed")
+`;
+
+/**
+ * Reads a Cursor API key on stdin and turns on the box's Cursor provider with it. T3 watches
+ * settings.json, so this takes effect without a restart; an unchanged key writes nothing.
+ */
+export const INSTALL_CURSOR_SCRIPT = String.raw`import json, os, sys
+key = sys.stdin.read().strip()
+path = os.path.expanduser("~/.t3/userdata/settings.json")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+settings = json.load(open(path)) if os.path.exists(path) else {}
+instances = settings.setdefault("providerInstances", {})
+current = instances.get("cursor", {})
+environment = [v for v in current.get("environment", []) if v.get("name") != "CURSOR_API_KEY"]
+wanted = {
+    **current,
+    "driver": "cursor",
+    "displayName": current.get("displayName", "Cursor"),
+    "enabled": True,
+    "environment": environment + [{"name": "CURSOR_API_KEY", "value": key, "sensitive": True}],
+}
+if wanted != current:
+    instances["cursor"] = wanted
+    os.umask(0o077)
+    with open(path + ".tmp", "w") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(path + ".tmp", path)
+    print("installed")
+else:
+    print("unchanged")
 `;
 
 /** Prints 1 when the box's T3 server has a run in progress, else 0. */
@@ -416,17 +551,12 @@ export function hoursWithin(spans: ReadonlyArray<TimeSpan>, since: number, until
   return ms / 3_600_000;
 }
 
-/**
- * What a box shows: an action in flight says what it is doing. A failure stays shown only while
- * Coder agrees nothing moved; a box that came up anyway, or that someone started, shows as it is.
- */
+/** A running VM does not mean its T3 setup succeeded; failures remain until a successful retry. */
 export function shownDevboxState(
   transient: DevboxState | undefined,
   actual: DevboxState,
 ): DevboxState {
-  if (transient === undefined) return actual;
-  if (transient !== "failed") return transient;
-  return actual === "stopped" || actual === "failed" || actual === "missing" ? "failed" : actual;
+  return transient ?? actual;
 }
 
 /**

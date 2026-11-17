@@ -20,6 +20,7 @@ import {
   type DevboxUsageInput,
   type DevboxUsageResult,
   type EnvironmentId,
+  WS_METHODS,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
@@ -36,6 +37,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -48,15 +50,20 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ProviderCredentialStore from "../provider/ProviderCredentialStore.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as DevboxCredentialPool from "./DevboxCredentialPool.ts";
+import { environmentRpc } from "./devboxRpc.ts";
 import {
   ACTIVE_RUN_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
+  INSTALL_CURSOR_SCRIPT,
   PAIR_SCRIPT,
   PROVISION_REVISION,
   PROVISION_SCRIPT,
   REMOTE_T3_PORT,
+  SIBLING_REMOVE_SCRIPT,
+  SIBLING_SCRIPT,
   parseCoderList,
   parsePairingToken,
   CoderBuild,
@@ -120,6 +127,11 @@ const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeDescriptor = Schema.decodeUnknownEffect(
   Schema.Struct({ environmentId: EnvironmentIdSchema }),
 );
+const decodeCursorCredentials = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({ apiKey: Schema.String, apiKeyExpiresAtMs: Schema.optionalKey(Schema.Finite) }),
+  ),
+);
 const decodeDescriptorId = (value: unknown) =>
   decodeDescriptor(value).pipe(Effect.map((descriptor) => descriptor.environmentId));
 
@@ -150,12 +162,13 @@ export class DevboxService extends Context.Service<
       provider: "claude" | "codex",
       code: string,
     ) => Effect.Effect<void, DevboxError>;
-    /** Starts creating a box and returns at once; it shows as `creating` until linked. */
+    /** Claims a spare or starts creating a box, returning without waiting for setup. */
     readonly create: (input: DevboxCreateInput) => Effect.Effect<DevboxSummary, DevboxError>;
-    /** Waits until the box is linked or failed, at most `timeout`. */
+    /** Waits for setup and optionally a login, at most `timeout`. */
     readonly awaitReady: (
       name: string,
       timeout: Duration.Input,
+      options?: { readonly waitForLogin: boolean },
     ) => Effect.Effect<DevboxSummary, DevboxError>;
     /** Starts waking a stopped box and returns at once in state `starting`. */
     readonly wake: (name: string) => Effect.Effect<DevboxSummary, DevboxError>;
@@ -191,7 +204,7 @@ const SSH_NOISE = /startup script|troubleshooting|incomplete/iu;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const runner = yield* ProcessRunner.ProcessRunner;
@@ -211,6 +224,7 @@ const make = Effect.gen(function* () {
     Effect.map(Option.getOrUndefined),
   );
   const pinnedT3Version = yield* Config.String("T3CODE_DEVBOX_T3_VERSION").pipe(Config.option);
+  const pythonPath = yield* Config.String("PYTHONPATH").pipe(Config.withDefault(""));
   // How many prepared boxes to keep waiting. Off unless set, so dev servers never create boxes.
   const spareCount = yield* Config.Int("T3CODE_DEVBOX_SPARES").pipe(Config.withDefault(0));
   const browserFilter = path.join(config.stateDir, "devbox-browser.sh");
@@ -218,6 +232,8 @@ const make = Effect.gen(function* () {
     .writeFileString(browserFilter, BROWSER_FILTER_SCRIPT, { mode: 0o755 })
     .pipe(Effect.ignore);
   const records = yield* Ref.make<ReadonlyMap<string, DevboxRecord>>(new Map());
+  const changes = yield* PubSub.unbounded<void>();
+  const allocation = yield* Semaphore.make(1);
   const nextNumber = yield* Ref.make<number | undefined>(undefined);
   const history = yield* Ref.make<ReadonlyArray<DeletedDevboxRecord>>([]);
   const transient = yield* Ref.make<ReadonlyMap<string, Transient>>(new Map());
@@ -257,6 +273,7 @@ const make = Effect.gen(function* () {
   const putRecord = (record: DevboxRecord) =>
     Ref.update(records, (current) => new Map(current).set(record.name, record)).pipe(
       Effect.andThen(save()),
+      Effect.tap(() => PubSub.publish(changes, undefined)),
     );
   // Background setup, the sign-in handout and claims all touch the same record; each changes
   // only its own fields on the current copy, so none of them undoes another.
@@ -272,7 +289,7 @@ const make = Effect.gen(function* () {
           ? Effect.fail(
               new DevboxError({ reason: "not_found", message: `No devbox named ${name}.` }),
             )
-          : save().pipe(Effect.as(next)),
+          : save().pipe(Effect.andThen(PubSub.publish(changes, undefined)), Effect.as(next)),
       ),
     );
   const getRecord = (name: string) =>
@@ -292,7 +309,7 @@ const make = Effect.gen(function* () {
       if (value === undefined) next.delete(name);
       else next.set(name, value);
       return next;
-    });
+    }).pipe(Effect.tap(() => PubSub.publish(changes, undefined)));
 
   // ── processes ────────────────────────────────────────────────────────────
   const run = (
@@ -302,6 +319,7 @@ const make = Effect.gen(function* () {
       readonly stdin?: string;
       readonly timeout?: Duration.Input;
       readonly cwd?: string;
+      readonly env?: NodeJS.ProcessEnv;
     },
   ) =>
     runner
@@ -311,7 +329,7 @@ const make = Effect.gen(function* () {
         ...(options?.stdin === undefined ? {} : { stdin: options.stdin }),
         ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
         timeout: options?.timeout ?? "2 minutes",
-        env: { BROWSER: browserFilter },
+        env: { BROWSER: browserFilter, ...options?.env },
       })
       .pipe(
         Effect.flatMap((result) =>
@@ -385,6 +403,12 @@ const make = Effect.gen(function* () {
     createdAt: record.createdAt,
     deadline: workspace?.latest_build.deadline ?? null,
     credentials: record.credentials,
+    loginRequired:
+      record.credentials.claude === "pool-empty" && record.credentials.codex === "pool-empty"
+        ? {
+            settingsUrl: "/settings/devboxes",
+          }
+        : null,
     lastError: current?.lastError ?? null,
   });
   const summaryOf = Effect.fn("DevboxService.summaryOf")(function* (name: string) {
@@ -516,6 +540,130 @@ const make = Effect.gen(function* () {
     }));
   });
 
+  // ── sibling links ────────────────────────────────────────────────────────
+  // Boxes link each other directly over Coder so their agents can delegate to one another
+  // without this machine in the path. A box reaches a sibling at the port this machine uses
+  // for it. Boxes run upstream T3, so this machine makes the links through each box's RPC.
+  const siblingLocks = yield* KeyedLock.make<string>();
+  const boxRpc = <A, E>(
+    record: DevboxRecord,
+    token: string,
+    use: (client: Effect.Success<ReturnType<typeof environmentRpc>>) => Effect.Effect<A, E>,
+  ) =>
+    Effect.scoped(
+      environmentRpc(`http://127.0.0.1:${record.localPort}`, token).pipe(Effect.flatMap(use)),
+    ).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
+  const lastLine = (stdout: string) => stdout.trim().split("\n").at(-1)?.trim() ?? "";
+
+  const linkSibling = Effect.fn("DevboxService.linkSibling")(
+    function* (from: DevboxRecord, to: DevboxRecord) {
+      const environmentId = to.environmentId as EnvironmentId;
+      const token = lastLine(
+        yield* ssh(from.name, `sh -s -- ${shellQuote(to.name)} ${to.localPort}`, SIBLING_SCRIPT),
+      );
+      const url = `http://127.0.0.1:${to.localPort}`;
+      yield* boxRpc(from, token, (client) =>
+        Effect.gen(function* () {
+          const { links } = yield* client[WS_METHODS.peerLinksList]({});
+          const existing = links.find((entry) => entry.environmentId === environmentId);
+          if (
+            existing !== undefined &&
+            existing.status !== "expired" &&
+            existing.urls.includes(url)
+          )
+            return;
+          if (existing !== undefined) yield* client[WS_METHODS.peerLinksUnlink]({ environmentId });
+          const pairingCode = yield* mintPairingCode(to.name, from.name);
+          // Naming the expected environment makes T3 refuse a loopback address outright, so the
+          // answering one is checked after linking instead.
+          const linked = yield* client[WS_METHODS.peerLinksLink]({
+            url,
+            pairingCode,
+            access: "full-access",
+            expectedLabel: to.name,
+          });
+          if (linked.environmentId !== environmentId) {
+            yield* client[WS_METHODS.peerLinksUnlink]({ environmentId: linked.environmentId });
+            return yield* new DevboxError({
+              reason: "link",
+              message: `${url} on ${from.name} answered as ${linked.label}, not ${to.name}.`,
+            });
+          }
+          yield* Effect.logInfo("devbox linked to sibling", { from: from.name, to: to.name });
+        }),
+      );
+    },
+    (effect, from, to) =>
+      siblingLocks
+        .withLock(`${from.name}>${to.name}`, effect)
+        .pipe(Effect.mapError(devboxError("link"))),
+  );
+
+  /** Links `name` and every other running box both ways. Safe to repeat. */
+  const linkSiblings = Effect.fn("DevboxService.linkSiblings")(function* (name: string) {
+    const all = yield* workspaces;
+    const current = yield* Ref.get(records);
+    const usable = (record: DevboxRecord | undefined): record is DevboxRecord =>
+      record !== undefined &&
+      record.spare !== true &&
+      record.environmentId !== null &&
+      all.get(record.name)?.latest_build.status === "running";
+    const self = current.get(name);
+    if (!usable(self)) return;
+    const others = [...current.values()].filter((record) => record.name !== name && usable(record));
+    yield* Effect.forEach(
+      others.flatMap((other) => [[self, other] as const, [other, self] as const]),
+      ([from, to]) =>
+        linkSibling(from, to).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("devbox sibling link failed", {
+              from: from.name,
+              to: to.name,
+              cause,
+            }),
+          ),
+        ),
+      { concurrency: 4, discard: true },
+    );
+  });
+
+  /** Removes every running box's tunnel and link to a box that is going away. */
+  const unlinkSiblings = Effect.fn("DevboxService.unlinkSiblings")(function* (gone: DevboxRecord) {
+    const all = yield* workspaces;
+    const others = [...(yield* Ref.get(records)).values()].filter(
+      (record) =>
+        record.name !== gone.name && all.get(record.name)?.latest_build.status === "running",
+    );
+    yield* Effect.forEach(
+      others,
+      (other) =>
+        ssh(
+          other.name,
+          `sh -s -- ${shellQuote(gone.name)}`,
+          SIBLING_REMOVE_SCRIPT,
+          "1 minute",
+        ).pipe(
+          Effect.flatMap((stdout) =>
+            gone.environmentId === null || other.environmentId === null
+              ? Effect.void
+              : boxRpc(other, lastLine(stdout), (client) =>
+                  client[WS_METHODS.peerLinksUnlink]({
+                    environmentId: gone.environmentId as EnvironmentId,
+                  }),
+                ),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("devbox sibling unlink failed", {
+              from: other.name,
+              to: gone.name,
+              cause,
+            }),
+          ),
+        ),
+      { concurrency: 4, discard: true },
+    );
+  });
+
   // ── provisioning ─────────────────────────────────────────────────────────
   const installCredentials = Effect.fn("DevboxService.installCredentials")(function* (
     record: DevboxRecord,
@@ -553,35 +701,91 @@ const make = Effect.gen(function* () {
     }));
   });
 
-  /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
-  const connect = Effect.fn("DevboxService.connect")(function* (stored: DevboxRecord) {
-    // The startup script (codez refresh, full redeploy) can run for over 30 minutes; agents
-    // only need ssh and the checkout, so connect as soon as the box's agent answers.
-    yield* coder(["ssh", "--wait=no", stored.name, "--", "true"], "10 minutes");
-    // A box whose creation stopped early, or that met an empty pool, still needs its logins.
-    const record = yield* installCredentials(stored);
-    // A box set up by this script starts T3 itself at boot: reconnecting is enough.
-    if (record.provisioned === PROVISION_REVISION && record.environmentId !== null) {
-      const reached = yield* startTunnel(record).pipe(
-        Effect.as(true),
-        Effect.orElseSucceed(() => false),
-      );
-      if (reached) return yield* link(record);
-    }
-    const version = yield* t3Version;
-    yield* ssh(
-      record.name,
-      `sh -s -- ${shellQuote(version)} ${shellQuote(record.name)}`,
-      PROVISION_SCRIPT,
-      "15 minutes",
-    );
-    const provisioned = yield* updateRecord(record.name, (current) => ({
-      ...current,
-      provisioned: PROVISION_REVISION,
-    }));
-    yield* startTunnel(provisioned);
-    return yield* link(provisioned);
+  // Every box uses this machine's Cursor sign-in: Cursor keys are per account, not per machine.
+  const cursorCredentials = yield* ProviderCredentialStore.make("cursor", "cursor");
+  const cursorApiKey = cursorCredentials.get.pipe(
+    Effect.flatMap(
+      Option.match({
+        onNone: () => Effect.succeedNone,
+        onSome: (bytes) =>
+          decodeCursorCredentials(new TextDecoder().decode(bytes)).pipe(Effect.asSome),
+      }),
+    ),
+    Effect.flatMap((credentials) =>
+      Clock.currentTimeMillis.pipe(
+        Effect.map((now) =>
+          Option.filter(
+            credentials,
+            (entry) => entry.apiKeyExpiresAtMs === undefined || entry.apiKeyExpiresAtMs > now,
+          ).pipe(Option.map((entry) => entry.apiKey)),
+        ),
+      ),
+    ),
+  );
+  const installCursor = Effect.fn("DevboxService.installCursor")(function* (name: string) {
+    const key = yield* cursorApiKey.pipe(Effect.orElseSucceed(() => Option.none<string>()));
+    if (Option.isNone(key)) return;
+    yield* ssh(name, `python3 -c ${shellQuote(INSTALL_CURSOR_SCRIPT)}`, key.value, "1 minute");
   });
+
+  /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
+  const connect = Effect.fn("DevboxService.connect")(
+    function* (stored: DevboxRecord) {
+      // The startup script (codez refresh, full redeploy) can run for over 30 minutes; agents
+      // only need ssh and the checkout, so connect as soon as the box's agent answers.
+      yield* coder(["ssh", "--wait=no", stored.name, "--", "true"], "10 minutes");
+      // A box whose creation stopped early, or that met an empty pool, still needs its logins.
+      const record = yield* installCredentials(stored);
+      // A box set up by this script starts T3 itself at boot: reconnecting is enough.
+      if (record.provisioned === PROVISION_REVISION && record.environmentId !== null) {
+        const reached = yield* startTunnel(record).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+        if (reached) return yield* link(record);
+      }
+      const version = yield* t3Version;
+      yield* ssh(
+        record.name,
+        `sh -s -- ${shellQuote(version)} ${shellQuote(record.name)}`,
+        PROVISION_SCRIPT,
+        "15 minutes",
+      );
+      const provisioned = yield* updateRecord(record.name, (current) => ({
+        ...current,
+        provisioned: PROVISION_REVISION,
+      }));
+      yield* startTunnel(provisioned);
+      return yield* link(provisioned);
+    },
+    (effect, stored) =>
+      effect.pipe(
+        Effect.tap(() => setTransient(stored.name, undefined)),
+        Effect.tap(() =>
+          FiberSet.run(
+            background,
+            installCursor(stored.name).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("devbox Cursor sign-in failed", { name: stored.name, cause }),
+              ),
+            ),
+          ),
+        ),
+        Effect.tap(() =>
+          FiberSet.run(
+            background,
+            linkSiblings(stored.name).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("devbox sibling links failed", { name: stored.name, cause }),
+              ),
+            ),
+          ),
+        ),
+        Effect.tapError((error) =>
+          setTransient(stored.name, { state: "failed", lastError: error.message }),
+        ),
+      ),
+  );
 
   const provision = Effect.fn("DevboxService.provision")(function* (
     record: DevboxRecord,
@@ -601,9 +805,18 @@ const make = Effect.gen(function* () {
       "bash",
       [
         "-c",
-        `source admin/mac.bashrc >/dev/null 2>&1; exec asana2/asana/tools/zoe/bin/z ${args.map(shellQuote).join(" ")}`,
+        'source "$CODEZ/admin/mac.bashrc" >/dev/null 2>&1; exec "$CODEZ/asana2/asana/tools/zoe/bin/z" "$@"',
+        "t3-devbox",
+        ...args,
       ],
-      { cwd: codezDir, timeout: CREATE_TIMEOUT },
+      {
+        cwd: codezDir,
+        timeout: CREATE_TIMEOUT,
+        env: {
+          CODEZ: codezDir,
+          PYTHONPATH: [codezDir, pythonPath].filter(Boolean).join(":"),
+        },
+      },
     ).pipe(
       Effect.mapError(devboxError("coder")),
       // z's later steps (SSO, commit-signing keys) can fail after the box itself is up.
@@ -622,7 +835,6 @@ const make = Effect.gen(function* () {
     );
     yield* coder(["autoupdate", record.name, "always"]).pipe(Effect.ignore);
     yield* connect(record);
-    yield* setTransient(record.name, undefined);
   });
 
   // Skips ports any process listens on, such as another T3 instance's devbox forwards.
@@ -659,7 +871,16 @@ const make = Effect.gen(function* () {
       environmentId: null,
       task: input.task ?? null,
       createdAt: DateTime.formatIso(yield* DateTime.now),
-      credentials: { claude: "not-installed", codex: "not-installed" },
+      credentials: {
+        claude:
+          (yield* pool.freeCount("claude").pipe(Effect.orElseSucceed(() => 0))) > 0
+            ? "not-installed"
+            : "pool-empty",
+        codex:
+          (yield* pool.freeCount("codex").pipe(Effect.orElseSucceed(() => 0))) > 0
+            ? "not-installed"
+            : "pool-empty",
+      },
       ...(spare ? { spare: true } : {}),
     };
     yield* putRecord(record);
@@ -680,14 +901,25 @@ const make = Effect.gen(function* () {
     return yield* summaryOf(name);
   });
 
-  const create: DevboxService["Service"]["create"] = (input) => startCreate(input, false);
-
   const awaitReady: DevboxService["Service"]["awaitReady"] = Effect.fn("DevboxService.awaitReady")(
-    function* (name, timeout) {
-      const settled = summaryOf(name).pipe(
-        Effect.repeat({
-          schedule: Schedule.spaced("5 seconds"),
-          until: (summary) => summary.state !== "creating" && summary.state !== "starting",
+    function* (name, timeout, options) {
+      const settled = Effect.scoped(
+        Effect.gen(function* () {
+          const subscription = yield* PubSub.subscribe(changes);
+          while (true) {
+            const summary = yield* summaryOf(name);
+            if (
+              summary.state !== "creating" &&
+              summary.state !== "starting" &&
+              (!options?.waitForLogin ||
+                summary.state !== "running" ||
+                summary.environmentId === null ||
+                summary.credentials.claude === "installed" ||
+                summary.credentials.codex === "installed")
+            )
+              return summary;
+            yield* PubSub.take(subscription);
+          }
         }),
       );
       return yield* settled.pipe(
@@ -710,7 +942,6 @@ const make = Effect.gen(function* () {
         if (workspace?.latest_build.status !== "running")
           yield* coder(["start", name, "--yes"], "15 minutes");
         yield* connect(record);
-        yield* setTransient(name, undefined);
       }).pipe(
         Effect.tapError((error) =>
           setTransient(name, { state: "failed", lastError: error.message }),
@@ -779,6 +1010,7 @@ const make = Effect.gen(function* () {
           yield* FiberMap.remove(tunnels, name);
           if (record.environmentId !== null)
             yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
+          yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
           if (workspace !== undefined) {
             yield* rememberDeleted(name, record.environmentId).pipe(
               Effect.catchCause((cause) =>
@@ -814,35 +1046,57 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const ensureSpares = Effect.gen(function* () {
-    if (spareCount <= 0) return;
-    const spares = [...(yield* Ref.get(records)).values()].filter(
-      (record) => record.spare === true,
+  const ensureSpares = allocation
+    .withPermit(
+      Effect.gen(function* () {
+        if (spareCount <= 0) return;
+        const spares = [...(yield* Ref.get(records)).values()].filter(
+          (record) => record.spare === true,
+        );
+        for (let missing = spareCount - spares.length; missing > 0; missing--) {
+          yield* startCreate({}, true);
+        }
+      }),
+    )
+    .pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("devbox spare could not be started", { cause }),
+      ),
     );
-    for (let missing = spareCount - spares.length; missing > 0; missing--) {
-      yield* startCreate({}, true);
-    }
-  }).pipe(
-    Effect.catchCause((cause) => Effect.logWarning("devbox spare could not be started", { cause })),
+
+  const create: DevboxService["Service"]["create"] = Effect.fn("DevboxService.create")(
+    function* (input) {
+      const box = yield* allocation.withPermit(
+        Effect.gen(function* () {
+          if (input.branch !== undefined) return yield* startCreate(input, false);
+          const all = yield* workspaces;
+          const spares = [...(yield* Ref.get(records)).values()].filter(
+            (record) => record.spare === true,
+          );
+          // A linked running spare is ready now; a stopped one wakes in about 90 seconds.
+          const ranked = spares.toSorted(
+            (a, b) =>
+              Number(all.get(b.name)?.latest_build.status === "running") -
+                Number(all.get(a.name)?.latest_build.status === "running") ||
+              Number(b.environmentId !== null) - Number(a.environmentId !== null),
+          );
+          const picked = ranked[0];
+          if (picked === undefined) return yield* startCreate(input, false);
+          yield* updateRecord(picked.name, ({ spare: _spare, ...claimed }) => ({
+            ...claimed,
+            task: input.task ?? null,
+          }));
+          if (!(yield* FiberMap.has(creations, picked.name))) yield* wake(picked.name);
+          return yield* summaryOf(picked.name);
+        }),
+      );
+      yield* FiberSet.run(background, ensureSpares);
+      return box;
+    },
   );
 
   const claim: DevboxService["Service"]["claim"] = Effect.gen(function* () {
-    const all = yield* workspaces;
-    const spares = [...(yield* Ref.get(records)).values()].filter(
-      (record) => record.spare === true,
-    );
-    // A linked running spare is ready now; a stopped one wakes in about 90 seconds.
-    const ranked = spares.toSorted(
-      (a, b) =>
-        Number(all.get(b.name)?.latest_build.status === "running") -
-          Number(all.get(a.name)?.latest_build.status === "running") ||
-        Number(b.environmentId !== null) - Number(a.environmentId !== null),
-    );
-    const picked = ranked[0];
-    const name = picked === undefined ? (yield* startCreate({}, false)).name : picked.name;
-    if (picked !== undefined)
-      yield* updateRecord(picked.name, ({ spare: _spare, ...claimed }) => claimed);
-    yield* FiberSet.run(background, ensureSpares);
+    const { name } = yield* create({});
     const settled = yield* awaitReady(name, CREATE_TIMEOUT);
     if (settled.state !== "running" || settled.environmentId === null) yield* wakeNow(name);
     // After a restart the forward to a running box may not be up yet; the client needs it now.
@@ -1162,6 +1416,7 @@ const make = Effect.gen(function* () {
     yield* FiberMap.remove(tunnels, name);
     if (record.environmentId !== null)
       yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
+    yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
     yield* pool.release(name);
     const now = yield* Clock.currentTimeMillis;
     yield* Ref.update(history, (current) => [
