@@ -37,7 +37,7 @@ const DevboxListTool = Tool.make("devbox_list", {
 const DevboxCreateTool = Tool.make("devbox_create", {
   ...shared,
   description:
-    "Get a Coder devbox for one task: claims a prepared spare and starts its replacement, or creates a box if none fits. Returns at once; call devbox_wait. If loginRequired is set or both credentials are pool-empty, tell the user the task is waiting and show [Add devbox logins](/settings/devboxes) in chat. Keep waiting with devbox_wait until a login is installed. Open Settings only when the user clicks the link. One box per task; no worktrees on boxes.",
+    "Get a Coder devbox for one task: claims a prepared spare and starts its replacement, or creates a box if none fits. Use this, not a devbox CLI or `coder create`: only boxes made here link to T3. Returns at once; call devbox_wait. If loginRequired is set or both credentials are pool-empty, tell the user the task is waiting and show [Add devbox logins](/settings/devboxes) in chat. Keep waiting with devbox_wait until a login is installed. Open Settings only when the user clicks the link. One box per task; no worktrees on boxes.",
   parameters: DevboxCreateInput,
   success: DevboxSummary,
 })
