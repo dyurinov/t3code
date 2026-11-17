@@ -49,6 +49,22 @@ export function asLaunchingThread<T extends EnvironmentThreadShell>(thread: T): 
   };
 }
 
+/** A thread whose sent message waits for its machine to come back reads as preparing. */
+export function asPreparingThread<T extends EnvironmentThreadShell>(thread: T): T {
+  if (threadRuntimeIsActive(thread.runtime)) return thread;
+  return {
+    ...thread,
+    runtime: {
+      status: "preparing",
+      activeRunId: null,
+      providerInstanceId: thread.runtime?.providerInstanceId ?? thread.providerInstanceId,
+      providerName: null,
+      lastError: null,
+      updatedAt: thread.updatedAt,
+    },
+  };
+}
+
 type InboxThreadInput = Pick<
   EnvironmentThreadShell,
   "id" | "environmentId" | "createdAt" | "unsettledAt" | "latestRun"

@@ -2,7 +2,7 @@ import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { useAtomValue } from "@effect/atom-react";
-import { PowerIcon, SquarePenIcon, XIcon } from "lucide-react";
+import { SquarePenIcon, XIcon } from "lucide-react";
 import {
   memo,
   useState,
@@ -22,7 +22,7 @@ import {
   type ComposerThreadDraftState,
   type DraftSessionState,
 } from "../../composerDraftStore";
-import { devboxSendWaitsAtom, type DevboxSendWait } from "../../state/devboxes";
+import { devboxSendWaitsAtom } from "../../state/devboxes";
 import { draftPenClassName, draftSurfaceClassName } from "./SidebarThreadRow";
 
 const SidebarDraftRow = memo(function SidebarDraftRow(props: {
@@ -135,62 +135,6 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   );
 });
 
-/** A message sent from a draft whose devbox is waking; its thread appears once the box has it. */
-const SidebarDevboxWaitRow = memo(function SidebarDevboxWaitRow(props: {
-  wait: DevboxSendWait;
-  project: ProjectFaviconProject | null;
-  projectDisplayName: string | null;
-  isActive: boolean;
-  onNavigate: (draftId: DraftId) => void;
-}) {
-  const { wait, onNavigate } = props;
-  const accessibility = resolveSidebarRowAccessibility({
-    title: wait.title,
-    statusLabel: wait.label,
-    projectDisplayName: props.projectDisplayName,
-    isActive: props.isActive,
-  });
-  const navigate = () => {
-    if (wait.draftId !== null) onNavigate(DraftId.make(wait.draftId));
-  };
-  return (
-    <li className="list-none py-0.5">
-      <div
-        role="button"
-        tabIndex={0}
-        aria-label={accessibility.label}
-        aria-current={accessibility.current}
-        data-testid="sidebar-devbox-wait-row"
-        className={cn(
-          "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md text-left text-sidebar-foreground outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-          props.isActive ? "bg-sidebar-row-active" : draftSurfaceClassName,
-        )}
-        onClick={navigate}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            navigate();
-          }
-        }}
-      >
-        <div className="relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
-          <div className="flex h-5 min-w-0 items-center gap-1.5">
-            {props.project ? (
-              <ProjectFavicon project={props.project} className="size-4 shrink-0" />
-            ) : null}
-            <span className="min-w-0 flex-1 truncate text-xs font-medium text-secondary-label">
-              {props.projectDisplayName}
-            </span>
-            <PowerIcon aria-hidden className="size-3 shrink-0 text-muted-foreground" />
-          </div>
-          <div className="mt-0.5 truncate text-sm font-medium text-foreground/90">{wait.title}</div>
-          <div className="truncate text-xs text-muted-foreground">{wait.label}</div>
-        </div>
-      </div>
-    </li>
-  );
-});
-
 interface SidebarDraftRowData {
   draftId: DraftId;
   session: DraftSessionState;
@@ -232,15 +176,14 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     }
     setFrozenActive({ routeDraftId: props.routeDraftId, row });
   }
-  const devboxWaits = [...useAtomValue(devboxSendWaitsAtom).values()].filter(
-    (wait) =>
-      wait.draftId !== null &&
-      (props.scopedProjectKeys === null || props.scopedProjectKeys.has(wait.projectKey)),
+  // A draft whose message waits on its devbox is listed as working instead.
+  const sentDraftIds = new Set(
+    [...useAtomValue(devboxSendWaitsAtom).values()].map((wait) => wait.draftId),
   );
   const drafts = (() => {
     const rows: SidebarDraftRowData[] = [];
     for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
-      if (devboxWaits.some((wait) => wait.draftId === draftKey)) continue;
+      if (sentDraftIds.has(draftKey)) continue;
       if (session.promotedTo != null) {
         continue;
       }
@@ -265,21 +208,11 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     rows.sort((left, right) => right.session.createdAt.localeCompare(left.session.createdAt));
     return rows;
   })();
-  if (drafts.length === 0 && devboxWaits.length === 0) {
+  if (drafts.length === 0) {
     return null;
   }
   return (
     <>
-      {devboxWaits.map((wait) => (
-        <SidebarDevboxWaitRow
-          key={`${wait.projectKey}:${wait.draftId}`}
-          wait={wait}
-          project={props.projectByKey.get(wait.projectKey) ?? null}
-          projectDisplayName={props.projectDisplayNameByKey.get(wait.projectKey) ?? null}
-          isActive={wait.draftId === props.routeDraftId}
-          onNavigate={props.onNavigateToDraft}
-        />
-      ))}
       {drafts.map(({ composer, draftId, session }) => {
         const projectKey = `${session.environmentId}:${session.projectId}`;
         return (

@@ -33,6 +33,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
   asLaunchingThread,
+  asPreparingThread,
   createInboxReturnTracker,
   isThreadWorking,
 } from "@t3tools/client-runtime/state/thread-inbox";
@@ -270,6 +271,9 @@ import {
   type SidebarSweepAction,
 } from "./sidebar/SidebarThreadRow";
 import { SidebarDraftBlock } from "./sidebar/SidebarDraftBlock";
+import { SidebarDevboxSendRow } from "./sidebar/SidebarDevboxSendRow";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import { devboxSendWaitsAtom } from "../state/devboxes";
 import {
   SidebarProjectFolderHeader,
   sidebarFolderRowId,
@@ -1104,14 +1108,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
   const threads = useQuietThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
+  const devboxSendWaits = useAtomValue(devboxSendWaitsAtom);
   const listedThreads =
-    promotingDraftThreadKeys.length === 0
+    promotingDraftThreadKeys.length === 0 && devboxSendWaits.size === 0
       ? threads
-      : threads.map((thread) =>
-          promotingDraftThreadKeys.includes(threadShellKey(thread))
-            ? asLaunchingThread(thread)
-            : thread,
-        );
+      : threads.map((thread) => {
+          const key = threadShellKey(thread);
+          if (promotingDraftThreadKeys.includes(key)) return asLaunchingThread(thread);
+          return devboxSendWaits.has(key) ? asPreparingThread(thread) : thread;
+        });
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
@@ -1187,6 +1192,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const scopedProjectGroups = revealWidensScope ? [] : chosenProjectGroups;
   const scopedProjectRefs = scopedProjectGroups.flatMap((project) => project.memberProjectRefs);
   const scopedProjectKeys = revealWidensScope ? null : chosenScopeProjectKeys;
+  // Sends from drafts whose devbox is still coming up: no thread exists yet to list.
+  const pendingDevboxSends = [...devboxSendWaits.values()]
+    .flatMap((wait) => (wait.draftId === null ? [] : [{ ...wait, draftId: wait.draftId }]))
+    .filter((wait) => scopedProjectKeys === null || scopedProjectKeys.has(wait.projectKey))
+    .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt));
   const threadSearch = useThreadSearch(
     connectedEnvironmentIds,
     threadSearchQuery,
@@ -1949,6 +1959,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       pinnedThreads.length +
         activeThreads.length +
         workingThreads.length +
+        pendingDevboxSends.length +
         snoozedThreads.length +
         settledCount ===
         0
@@ -1962,7 +1973,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     const activeRows = rowsOf(activeThreads, "active");
     items.push({ kind: "marker", marker: "active-placeholder" });
     items.push(...activeRows);
-    if (workingThreads.length > 0) {
+    if (workingThreads.length > 0 || (workingShelfEnabled && pendingDevboxSends.length > 0)) {
       items.push({ kind: "marker", marker: "working-header" });
       items.push(...rowsOf(visibleWorkingThreads, "working"));
     }
@@ -3290,6 +3301,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           pinnedThreads.length +
             activeThreads.length +
             workingThreads.length +
+            pendingDevboxSends.length +
             snoozedThreads.length ===
             0 &&
           (settledCount === 0 || scopedProjectGroups.length > 0) ? (
@@ -3494,6 +3506,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           onDraftContextMenu={handleDraftContextMenu}
                         />,
                       ];
+                      const projectsByKey: ReadonlyMap<string, EnvironmentProject> = projectByKey;
+                      const projectNamesByKey: ReadonlyMap<string, string> =
+                        projectDisplayNameByKey;
+                      const renderDevboxSendRow = (wait: (typeof pendingDevboxSends)[number]) => (
+                        <SidebarDevboxSendRow
+                          key={`devbox-send:${wait.projectKey}:${wait.draftId}`}
+                          wait={wait}
+                          project={projectsByKey.get(wait.projectKey) ?? null}
+                          projectDisplayName={projectNamesByKey.get(wait.projectKey) ?? null}
+                          isActive={wait.draftId === routeDraftIdForRows}
+                          onNavigate={navigateToDraft}
+                        />
+                      );
+                      if (!workingShelfEnabled)
+                        items.push(...pendingDevboxSends.map(renderDevboxSendRow));
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
                           // Folders draw active rows in their own place below.
@@ -3574,12 +3601,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 marker="working-header"
                                 className="mt-auto"
                                 label="Working"
-                                count={workingThreads.length}
+                                count={workingThreads.length + pendingDevboxSends.length}
                                 toggle={{
                                   expanded: workingShelfExpanded,
                                   onToggle: toggleWorkingShelf,
                                 }}
                               />,
+                            );
+                            items.push(
+                              ...pendingDevboxSends
+                                .filter(
+                                  (wait) =>
+                                    workingShelfExpanded || wait.draftId === routeDraftIdForRows,
+                                )
+                                .map(renderDevboxSendRow),
                             );
                             break;
                           case "snoozed-header":

@@ -82,9 +82,11 @@ it("shows devbox creation in the sidebar and keeps sending after navigating to a
   await expect.element(page.getByText("render", { exact: true }).first()).toBeVisible();
   await userEvent.click(editor);
   await userEvent.keyboard("{Enter}");
-  const row = screen.getByTestId("sidebar-devbox-wait-row");
+  const row = screen.getByTestId("sidebar-devbox-send-row");
   await expect.element(row.getByText("Work on my new devbox", { exact: true })).toBeVisible();
+  await expect.element(row.getByText("Setting up", { exact: true })).toBeVisible();
   await expect.element(row.getByText("Preparing devbox…", { exact: true })).toBeVisible();
+  expect(screen.getByTestId("sidebar-draft-row").query()).toBeNull();
   expect(launches).toEqual([]);
   expect(page.getByText("Queued for the devbox").query()).toBeNull();
 
