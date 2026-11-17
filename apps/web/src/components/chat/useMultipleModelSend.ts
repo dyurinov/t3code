@@ -63,7 +63,6 @@ interface MultipleModelSendInput {
  */
 export function useMultipleModelSend(input: MultipleModelSendInput) {
   const {
-    environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
     draftId,
@@ -85,6 +84,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     draftSendState(routeThreadKey);
 
   return async ({
+    environmentId = input.environmentId,
     threadId,
     project,
     branch,
@@ -99,6 +99,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     isCurrentSend,
     draftChangedDuringPreparation,
   }: {
+    readonly environmentId?: EnvironmentId;
     readonly threadId: ThreadId;
     readonly project: EnvironmentProject;
     readonly branch: string;
@@ -137,9 +138,11 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
         text: messageText,
         attachments: attachmentsSnapshot,
       });
-      promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
-      composerRef.current?.resetCursorState();
+      if (currentRouteThreadKeyRef.current === routeThreadKey) {
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+      }
       clearedDraft = true;
       const clearedDraftSnapshot = useComposerDraftStore
         .getState()

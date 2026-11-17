@@ -37,7 +37,7 @@ const DevboxListTool = Tool.make("devbox_list", {
 const DevboxCreateTool = Tool.make("devbox_create", {
   ...shared,
   description:
-    "Create a Coder devbox for one task and link it as an environment. Returns at once in state `creating`; it takes 3–40 minutes. Then call `devbox_wait`. One box per task; no worktrees on boxes.",
+    "Get a Coder devbox for one task: claims a prepared spare and starts its replacement, or creates a box if none fits. Returns at once; call devbox_wait. If loginRequired is set or both credentials are pool-empty, tell the user the task is waiting and show [Add devbox logins](/settings/devboxes) in chat. Keep waiting with devbox_wait until a login is installed. Open Settings only when the user clicks the link. One box per task; no worktrees on boxes.",
   parameters: DevboxCreateInput,
   success: DevboxSummary,
 })
@@ -48,7 +48,7 @@ const DevboxCreateTool = Tool.make("devbox_create", {
 const DevboxWaitTool = Tool.make("devbox_wait", {
   ...shared,
   description:
-    "Wait up to `seconds` (default 240) for a devbox to finish creating or waking. Returns its summary; `running` with an `environmentId` is ready. Call again while it is still `creating`.",
+    "Wait up to `seconds` (default 240) for a devbox to finish setup and receive an agent login. Ready means running with an environmentId and an installed credential. If loginRequired is set, show [Add devbox logins](/settings/devboxes) in chat and tell the user the task is waiting; keep calling this tool until a login is installed. Do not open Settings or a login browser automatically. Report lastError instead of retrying failed setup indefinitely.",
   parameters: Schema.Struct({
     ...DevboxNameInput.fields,
     seconds: Schema.optionalKey(Schema.Number.annotate({ description: "At most 280." })),
@@ -62,7 +62,7 @@ const DevboxWaitTool = Tool.make("devbox_wait", {
 const DevboxWakeTool = Tool.make("devbox_wake", {
   ...shared,
   description:
-    "Start waking a sleeping devbox; returns at once in state `starting`. It takes about 2 minutes; then call `devbox_wait`.",
+    "Wake a sleeping devbox or retry setup on an existing one, preserving its files and threads. Returns at once in state `starting`; then call `devbox_wait`.",
   parameters: DevboxNameInput,
   success: DevboxSummary,
 })

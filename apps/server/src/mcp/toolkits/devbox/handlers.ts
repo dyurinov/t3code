@@ -33,7 +33,9 @@ export const layer = McpToolAccess.toLayer(DevboxToolkit, {
   ),
   devbox_wait: McpToolAccess.reads(({ name, seconds }) =>
     withService((service) =>
-      service.awaitReady(name, Duration.seconds(Math.min(280, Math.max(5, seconds ?? 240)))),
+      service.awaitReady(name, Duration.seconds(Math.min(280, Math.max(5, seconds ?? 240))), {
+        waitForLogin: true,
+      }),
     ),
   ),
   devbox_wake: McpToolAccess.writesEnvironment(({ name }) =>

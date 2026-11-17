@@ -1,4 +1,10 @@
-import { CommandId, type ModelSelection, type ThreadId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  sessionGrantsScope,
+  CommandId,
+  type ModelSelection,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -8,6 +14,12 @@ import {
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
+
+import { createEnvironmentSessionAtoms, sessionDeniesScope } from "./session.ts";
+import {
+  createOfflineThreadActions,
+  type OfflineThreadActionStorage,
+} from "./offlineThreadActions.ts";
 
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
@@ -68,6 +80,8 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 
+export type { OfflineThreadActionStorage } from "./offlineThreadActions.ts";
+
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
   readonly throughEntryId?: string;
@@ -77,6 +91,7 @@ export type LoadEarlierThreadHistoryInput = {
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | SecureRandom.SecureRandom | R, E>,
   snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
+  offlineStorage?: OfflineThreadActionStorage,
 ) {
   const scheduler = createAtomCommandScheduler();
   const concurrency = {
@@ -465,7 +480,7 @@ export function createThreadEnvironmentAtoms<R, E>(
       return mapAtomCommandResult(armed, () => outcome);
     },
   };
-  return {
+  const lifecycle = {
     ...commands,
     regenerateTitle,
     rowActionsAtom,
@@ -555,6 +570,75 @@ export function createThreadEnvironmentAtoms<R, E>(
     setModelSelection: optimistic.wrap(commands.setModelSelection, (thread, input) => ({
       ...thread,
       modelSelection: input.modelSelection,
+    })),
+  };
+  const connectedAtom = Atom.family((id: EnvironmentId) =>
+    Atom.make((get) => {
+      const connection = AsyncResult.getOrElse(
+        get(environmentConnectionAtom(runtime, id)),
+        () => null,
+      );
+      return connection !== null && connectionProjectionPhase(connection[0]) === "ready";
+    }),
+  );
+  const offlineAtom = Atom.family((id: EnvironmentId) =>
+    Atom.make((get) => !get(connectedAtom(id))),
+  );
+  const sessions = createEnvironmentSessionAtoms(runtime);
+  const canOrganizeAtom = Atom.family((id: EnvironmentId) =>
+    Atom.make((get) => {
+      const session = get(sessions.sessionStateAtom(id));
+      if (offlineStorage && get(offlineAtom(id)))
+        return !sessionDeniesScope(session, AuthOrchestrationOperateScope);
+      const value = AsyncResult.getOrElse(session, () => null);
+      return (
+        session._tag !== "Failure" &&
+        value !== null &&
+        sessionGrantsScope(value, AuthOrchestrationOperateScope)
+      );
+    }),
+  );
+  if (!offlineStorage) return { ...lifecycle, offlineAtom, canOrganizeAtom };
+  const offline = createOfflineThreadActions({
+    storage: offlineStorage,
+    snapshotAtom: lifecycle.snapshotAtom,
+    connectedAtom,
+    allowedAtom: canOrganizeAtom,
+    onQueued: (registry, id) => registry.update(rowActionsAtom(id), (count) => count + 1),
+  });
+  const targetInput = (action: Parameters<Parameters<typeof offline.wrap>[2]>[0]) => ({
+    commandId: action.commandId,
+    threadId: action.threadId,
+  });
+  return {
+    ...lifecycle,
+    offlineAtom,
+    canOrganizeAtom,
+    snapshotAtom: offline.snapshotAtom,
+    settle: offline.wrap("settle", lifecycle.settle, targetInput),
+    unsettle: offline.wrap("unsettle", lifecycle.unsettle, (action) => ({
+      ...targetInput(action),
+      reason: "user" as const,
+      ...(action.restoreUnsettledAt === undefined
+        ? {}
+        : { restoreUnsettledAt: action.restoreUnsettledAt }),
+    })),
+    snooze: offline.wrap("snooze", lifecycle.snooze, (action) => ({
+      ...targetInput(action),
+      snoozedUntil: action.snoozedUntil ?? action.occurredAt,
+    })),
+    unsnooze: offline.wrap("unsnooze", lifecycle.unsnooze, (action) => ({
+      ...targetInput(action),
+      reason: "user" as const,
+    })),
+    pin: offline.wrap("pin", lifecycle.pin, (action) => ({
+      ...targetInput(action),
+      ...(action.orderKey === undefined ? {} : { orderKey: action.orderKey }),
+    })),
+    unpin: offline.wrap("unpin", lifecycle.unpin, targetInput),
+    reorderActive: offline.wrap("reorderActive", lifecycle.reorderActive, (action) => ({
+      ...targetInput(action),
+      orderKey: action.orderKey ?? "",
     })),
   };
 }

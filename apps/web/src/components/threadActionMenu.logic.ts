@@ -69,6 +69,7 @@ export function buildDraftActionMenuItems(options: {
 
 export interface ThreadActionMenuState {
   readonly canOperate: boolean;
+  readonly canOrganize?: boolean;
   readonly canFind?: boolean;
   readonly branch: string | null;
   readonly projectFilter: {
@@ -111,6 +112,16 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "copy-thread",
     "copy-thread-id",
   ].includes(action);
+}
+
+export function isThreadOrganizationAction(action: string): boolean {
+  return (
+    action === "settle" ||
+    action === "unsettle" ||
+    action === "unsnooze" ||
+    action === "snooze" ||
+    action.startsWith("snooze:")
+  );
 }
 
 export function buildThreadActionMenuItems(
@@ -256,7 +267,8 @@ export function buildThreadActionMenuItems(
   return state.canOperate
     ? items
     : items.map((item) =>
-        threadActionRequiresOperate(item.id)
+        threadActionRequiresOperate(item.id) &&
+        !(state.canOrganize && isThreadOrganizationAction(item.id))
           ? {
               ...item,
               disabled: true,

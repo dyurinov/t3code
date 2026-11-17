@@ -47,8 +47,7 @@ import {
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { devboxClaimLabel, useNewDevbox } from "./devbox/useNewDevbox";
-import { devboxClaimAtom } from "../state/devboxes";
-import { useAtomSet } from "@effect/atom-react";
+import { useDevboxClaim } from "../state/devboxes";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -685,8 +684,8 @@ export const BranchToolbar = memo(function BranchToolbar({
   );
 
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
-  const newDevbox = useNewDevbox();
-  const setDevboxClaim = useAtomSet(devboxClaimAtom);
+  const newDevbox = useNewDevbox(draftId ?? null);
+  const [, setDevboxClaim] = useDevboxClaim(draftId ?? null);
   const onNewDevbox =
     newDevbox.available && onEnvironmentChange !== undefined && !envLocked
       ? () => void newDevbox.start()
@@ -699,7 +698,7 @@ export const BranchToolbar = memo(function BranchToolbar({
     (availableEnvironments?.some((env) => env.environmentId === claimedEnvironmentId) ?? false);
   const moveDraftToDevbox = useEffectEvent(
     (target: EnvironmentId | null, listed: boolean, current: EnvironmentId) => {
-      if (claim.kind !== "ready" || target === null) return;
+      if (claim.kind !== "ready" || claim.submitted || target === null) return;
       if (current === target) setDevboxClaim({ ...claim, kind: "switched" });
       else if (listed) onEnvironmentChange?.(target);
     },

@@ -8,6 +8,9 @@ import type {
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { createDevboxClaims, type DevboxClaimState } from "./devboxClaims";
+
 import { connectionAtomRuntime } from "../connection/runtime";
 import { usePrimaryEnvironmentId } from "./environments";
 import { useEnvironmentQuery } from "./query";
@@ -133,27 +136,22 @@ export function useDevboxAsleep(environmentId: EnvironmentId | null): boolean {
   return state !== undefined && state !== "running";
 }
 
-/**
- * This client taking a devbox for the draft: preparing (the host claims and wakes a box),
- * ready (paired; waiting for its project to load so the draft can move), then switched.
- * `queuedSend` holds a send pressed meanwhile, made once the draft is on the box.
- */
-export type DevboxClaimState =
-  | { readonly kind: "idle" }
-  | { readonly kind: "preparing"; readonly queuedSend: boolean }
-  | {
-      readonly kind: "ready" | "switched";
-      readonly environmentId: EnvironmentId;
-      readonly name: string;
-      readonly queuedSend: boolean;
-    };
+export const devboxClaims = createDevboxClaims();
+
+export function useDevboxClaim(draftId: string | null) {
+  const state = useAtomValue(devboxClaims.stateAtom(draftId));
+  const set = (change: DevboxClaimState | ((current: DevboxClaimState) => DevboxClaimState)) => {
+    if (draftId !== null) devboxClaims.set(appAtomRegistry, draftId, change);
+  };
+  return [state, set] as const;
+}
 
 /**
- * Sends shown as sent while their devbox wakes, by `devboxSendKey`: what the working row says
+ * Sends shown as sent while their devbox starts, by `devboxSendKey`: what the working row says
  * until the box connects and the message goes out.
  */
 export interface DevboxSendWait {
-  /** What the working row says, such as "Waking shiny-pine…". */
+  /** Progress while the devbox is being prepared, connected, or woken. */
   readonly label: string;
   readonly title: string;
   /** The draft the send started from; its thread does not exist on the box yet. */
@@ -171,8 +169,3 @@ export const devboxSendWaitsAtom = Atom.make<ReadonlyMap<string, DevboxSendWait>
 export function devboxSendKey(environmentId: EnvironmentId, threadId: string): string {
   return `${environmentId}:${threadId}`;
 }
-
-export const devboxClaimAtom = Atom.make<DevboxClaimState>({ kind: "idle" }).pipe(
-  Atom.keepAlive,
-  Atom.withLabel("devboxes:claim"),
-);

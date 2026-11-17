@@ -14,6 +14,10 @@ import { createSteadyShellAtoms } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/reactivity";
 
+import * as Crypto from "expo-crypto";
+import * as Dialog from "../components/ui/Dialog";
+import { writeFileAtomically } from "../lib/atomic-file";
+
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { scopedThreadKey } from "../lib/scopedEntities";
@@ -34,9 +38,27 @@ export const olderSettledThreads = createOlderSettledThreadAtoms(
   connectionAtomRuntime,
   environmentShell.stateAtom,
 );
+async function offlineThreadActionsFile(id: EnvironmentId) {
+  const { File, Paths } = await import("expo-file-system");
+  return new File(Paths.document, `thread-organization-${encodeURIComponent(id)}.json`);
+}
+
 export const threadEnvironment = createThreadEnvironmentAtoms(
   connectionAtomRuntime,
   threadFamilies.snapshotAtom,
+  {
+    load: async (id) => {
+      const file = await offlineThreadActionsFile(id);
+      return file.exists ? await file.text() : null;
+    },
+    save: async (id, value) => writeFileAtomically(await offlineThreadActionsFile(id), value),
+    uuid: () => Crypto.randomUUID(),
+    onError: (error) =>
+      Dialog.alert(
+        "Could not synchronize thread organization",
+        error instanceof Error ? error.message : String(error),
+      ),
+  },
 );
 export const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
@@ -110,4 +132,19 @@ export function useEnvironmentThread(
     () => EMPTY_ENVIRONMENT_THREAD_STATE,
   ) as EnvironmentThreadState;
   return state;
+}
+
+export function useCanOrganizeThread(environmentId: EnvironmentId): boolean {
+  return useAtomValue(threadEnvironment.canOrganizeAtom(environmentId));
+}
+
+export function readCanOrganizeThread(environmentId: EnvironmentId): boolean {
+  return appAtomRegistry.get(threadEnvironment.canOrganizeAtom(environmentId));
+}
+
+export function readThreadOrganizationSupported(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(threadEnvironment.offlineAtom(environmentId)) ||
+    appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId)) !== null
+  );
 }

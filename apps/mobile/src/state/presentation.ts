@@ -1,3 +1,4 @@
+import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentPresentation } from "@t3tools/client-runtime/connection";
 import {
@@ -25,6 +26,12 @@ export const { connectedEnvironmentIdsAtom } = createEnvironmentSummaryAtoms({
 export const threadListEnvironmentsAtom = createThreadListEnvironmentsAtom(
   environmentServerConfigsAtom,
   connectedEnvironmentIdsAtom,
+  Atom.make((get) => {
+    const connected = new Set(get(connectedEnvironmentIdsAtom));
+    return [...enabledEnvironmentIds(get(environmentCatalog.catalogValueAtom))].filter(
+      (id) => !connected.has(id),
+    );
+  }),
 );
 
 const EMPTY_ENVIRONMENT_PRESENTATION_ATOM = Atom.make<EnvironmentPresentation | null>(null).pipe(

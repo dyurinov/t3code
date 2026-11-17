@@ -291,6 +291,10 @@ After the change, the first reference to a file is an absolute link. The remaini
 
 ## Where T3's text lives
 
+`cases/devboxes.ndjson` covers an empty login pool: the agent shows a clickable Devboxes Settings link and keeps waiting. Its control delegates immediately when the box already has logins.
+
+`cases/fork-restart.ndjson` loads the fork's shared restart skill and checks that a requested restart uses its script. The control explains the procedure without restarting the app.
+
 - `packages/provider-core/src/server/runtimeInstructions.ts`
 - `packages/provider-core/src/server/orchestrationInstructions.ts`
 - `apps/server/src/provider/CodexDeveloperInstructions.ts`

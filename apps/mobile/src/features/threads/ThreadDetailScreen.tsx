@@ -1,3 +1,4 @@
+import { readCanOrganizeThread, useCanOrganizeThread } from "../../state/threads";
 import { ChildThreadApprovals } from "./ChildThreadApprovals";
 import { useOpenThreadInspector } from "./thread-inspector-navigation";
 import { useSidebarWorkspaceTabs } from "../layout/workspace/useSystemWorkspaceTabBar";
@@ -674,8 +675,15 @@ function ThreadDetailBody(
     lastVisitedAt: props.selectedThread.lastVisitedAt,
     latestRunCompletedAt: props.selectedThread.latestRun?.completedAt ?? null,
   });
+  const canOrganizeThread = useCanOrganizeThread(props.environmentId);
   const runStatusAction = async (action: "stop" | "wake" | "unsettle" | "dismiss") => {
-    if (statusPending || !props.canOperateThread) return;
+    if (
+      statusPending ||
+      (action === "wake" || action === "unsettle"
+        ? !readCanOrganizeThread(props.environmentId)
+        : !props.canOperateThread)
+    )
+      return;
     const request: BackgroundWorkStopRequest = {
       threadKey: selectedThreadKey,
       taskIds:
@@ -862,7 +870,9 @@ function ThreadDetailBody(
                 : "Dismissing..."
             : actionLabel,
           accessibilityLabel: actionLabel,
-          disabled: !props.canOperateThread || statusPending,
+          disabled:
+            !(lifecycleSnoozed || settled ? canOrganizeThread : props.canOperateThread) ||
+            statusPending,
           onPress: () =>
             void runStatusAction(lifecycleSnoozed ? "wake" : settled ? "unsettle" : "dismiss"),
         },

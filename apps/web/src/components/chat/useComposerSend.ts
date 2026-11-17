@@ -1,3 +1,5 @@
+import { t } from "gt-react";
+import { prepareDevboxDraft } from "../devbox/devboxDraft";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
 import {
@@ -60,15 +62,18 @@ import {
 import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { isProviderInstancePickerReady } from "../../providerInstances";
-import { useAtom, useAtomSet } from "@effect/atom-react";
+import {
+  deriveProviderInstanceEntries,
+  isProviderInstancePickerReady,
+} from "../../providerInstances";
+import { useAtomSet } from "@effect/atom-react";
 import {
   devboxForEnvironment,
   devboxSendKey,
   type DevboxSendWait,
   devboxSendWaitsAtom,
   useWakeDevbox,
-  devboxClaimAtom,
+  useDevboxClaim,
   useDevboxes,
 } from "../../state/devboxes";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
@@ -300,10 +305,8 @@ export function useComposerSend(input: ComposerSendInput) {
     currentRouteThreadKeyRef,
     draftId,
     draftThread,
-    activeThread,
     activeThreadKey,
     activeThreadBranch,
-    activeProject,
     activeProjectIsScratch,
     activeProjectDefaultModelSelection,
     activeMessageCount,
@@ -397,7 +400,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const { hostEnvironmentId: devboxHostId, devboxes } = useDevboxes();
-  const [devboxClaim, setDevboxClaim] = useAtom(devboxClaimAtom);
+  const [devboxClaim, setDevboxClaim] = useDevboxClaim(draftId ?? routeThreadKey);
   const wakeDevbox = useWakeDevbox();
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
   const pendingApprovalsRef = useRef(pendingApprovals);
@@ -440,9 +443,20 @@ export function useComposerSend(input: ComposerSendInput) {
     },
   ) => {
     e?.preventDefault();
+    let environmentId = input.environmentId;
+    let activeProject = input.activeProject;
+    const activeThread = input.activeThread;
+    const newDevboxDraft =
+      draftId !== null &&
+      isLocalDraftThread &&
+      (devboxClaim.kind === "preparing" || devboxClaim.kind === "ready");
     // What the user pressed send on; uploads below can take a while, and a redirect must not
     // decline approvals for a draft that changed meanwhile.
     const promptAtSend = promptRef.current;
+    if (devboxClaim.kind === "failed") {
+      toastManager.add(stackedThreadToast({ type: "error", title: devboxClaim.error }));
+      return;
+    }
     if (
       usageLimitsOffered &&
       usageLimitsKey !== null &&
@@ -501,7 +515,7 @@ export function useComposerSend(input: ComposerSendInput) {
           kind: "switched",
           environmentId: sleepingDevbox.environmentId,
           name: sleepingDevbox.name,
-          queuedSend: true,
+          submitted: true,
         });
       }
       toastManager.add(
@@ -543,7 +557,7 @@ export function useComposerSend(input: ComposerSendInput) {
       }
       return;
     }
-    if (needsLoadBalancing) {
+    if (needsLoadBalancing && !newDevboxDraft) {
       const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
       toastManager.add({
         type: "warning",
@@ -555,17 +569,6 @@ export function useComposerSend(input: ComposerSendInput) {
           ),
         }),
       });
-      return;
-    }
-    if (devboxClaim.kind === "preparing" || devboxClaim.kind === "ready") {
-      setDevboxClaim({ ...devboxClaim, queuedSend: true });
-      toastManager.add(
-        stackedThreadToast({
-          type: "info",
-          title: "Queued for the devbox",
-          description: "It sends as soon as the devbox is ready.",
-        }),
-      );
       return;
     }
     if (activeEnvironmentUnavailable && !sendWaitsForDevbox) {
@@ -1018,7 +1021,8 @@ export function useComposerSend(input: ComposerSendInput) {
       }
     };
     // A box that is down cannot take uploads; they start once it answers.
-    const uploadsWaitForDevbox = sendWaitsForDevbox && multipleModelSelections === null;
+    const uploadsWaitForDevbox =
+      newDevboxDraft || (sendWaitsForDevbox && multipleModelSelections === null);
     if (!uploadsWaitForDevbox) startAttachmentUploads();
 
     if (
@@ -1242,7 +1246,7 @@ export function useComposerSend(input: ComposerSendInput) {
             : submissionIntent,
       });
       beginWorktreeSetup(
-        multipleModelSelections === null && baseBranchForWorktree
+        !newDevboxDraft && multipleModelSelections === null && baseBranchForWorktree
           ? { environmentId: activeThread.environmentId, threadId: threadIdForSend }
           : null,
       );
@@ -1256,7 +1260,7 @@ export function useComposerSend(input: ComposerSendInput) {
         draftTarget: composerDraftTarget,
       });
     let turnAttachmentsPromise = uploadsWaitForDevbox ? null : prepareAttachments();
-    if (multipleModelSelections !== null) {
+    if (multipleModelSelections !== null && !newDevboxDraft) {
       await sendToMultipleModels({
         threadId: threadIdForSend,
         project: activeProject,
@@ -1319,7 +1323,7 @@ export function useComposerSend(input: ComposerSendInput) {
         }),
       );
     }
-    const sentDraftThreadRef = isLocalDraftThread
+    let sentDraftThreadRef = isLocalDraftThread
       ? scopeThreadRef(environmentId, threadIdForSend)
       : null;
     // Keep new-thread flows from reusing this draft while attachments and worktree setup settle.
@@ -1336,13 +1340,125 @@ export function useComposerSend(input: ComposerSendInput) {
       attachments: composerAttachmentsSnapshot,
       fallbackLabels: sendTitleFallbackLabels(sendSnapshot),
     });
-    const threadCreateModelSelection = createModelSelection(
+    let dispatchModelSelection = ctxSelectedModelSelection;
+    let threadCreateModelSelection = createModelSelection(
       ctxSelectedModelSelection.instanceId,
       ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
       ctxSelectedModelSelection.options,
     );
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
+
+    let newDevboxWaitKey: string | null = null;
+    if (newDevboxDraft) {
+      newDevboxWaitKey = devboxSendKey(environmentId, threadIdForSend);
+      const waitKey = newDevboxWaitKey;
+      const shown = {
+        title,
+        draftId,
+        projectKey: `${activeProject.environmentId}:${activeProject.id}`,
+        createdAt: messageCreatedAt,
+      };
+      const progress = (label: string) =>
+        setDevboxSendWaits((current) => new Map(current).set(waitKey, { ...shown, label }));
+      progress(
+        devboxClaim.kind === "ready"
+          ? t("Connecting {name}…", { name: devboxClaim.name })
+          : t("Preparing devbox…"),
+      );
+      setDevboxClaim((current) =>
+        current.kind === "preparing" || current.kind === "ready"
+          ? { ...current, submitted: true }
+          : current,
+      );
+      const prepared = await settlePromise(() =>
+        prepareDevboxDraft({
+          draftId,
+          project: activeProject!,
+          selection: ctxSelectedModelSelection,
+          driver: ctxSelectedProvider,
+          progress,
+        }),
+      );
+      if (prepared._tag === "Failure") failure = prepared;
+      else {
+        const target = prepared.value;
+        environmentId = target.environmentId;
+        activeProject = target.project;
+        dispatchModelSelection = target.selection;
+        threadCreateModelSelection = target.selection;
+        sentDraftThreadRef = scopeThreadRef(environmentId, threadIdForSend);
+        const store = useComposerDraftStore.getState();
+        store.setDraftThreadContext(draftId, {
+          projectRef: scopeProjectRef(environmentId, activeProject.id),
+          branch: activeThreadBranch,
+          worktreePath: null,
+          environmentSelection: "manual",
+        });
+        store.markDraftThreadPromoting(draftId, sentDraftThreadRef);
+        startAttachmentUploads();
+        turnAttachmentsPromise = prepareAttachments();
+      }
+    }
+
+    if (newDevboxDraft && multipleModelSelections !== null && failure === null) {
+      const config = appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId);
+      const providers = deriveProviderInstanceEntries(config?.providers ?? []);
+      const selections = multipleModelSelections.map((selection) => {
+        const source = providerInstanceEntries.find(
+          (entry) => entry.instanceId === selection.instanceId,
+        );
+        const target =
+          providers.find(
+            (entry) =>
+              entry.instanceId === selection.instanceId && entry.driverKind === source?.driverKind,
+          ) ?? providers.find((entry) => entry.driverKind === source?.driverKind);
+        return { ...selection, instanceId: target?.instanceId ?? selection.instanceId };
+      });
+      const targets = resolveMultipleModelTargets({
+        selections,
+        providerInstanceEntries: providers,
+        messageText: messageTextForSend,
+      });
+      const invalid = targets.find((target) => "error" in target);
+      if (invalid && "error" in invalid) {
+        const rejected = await settlePromise(() => Promise.reject(new Error(invalid.error)));
+        if (rejected._tag === "Failure") failure = rejected;
+      } else {
+        setOptimisticUserMessages((messages) =>
+          messages.filter((message) => message.id !== messageIdForSend),
+        );
+        optimisticBlobPreviews.release(optimisticMessage);
+        if (draftId && draftThread) restoreFailedDraftThread(draftId, draftThread, threadIdForSend);
+        await sendToMultipleModels({
+          environmentId,
+          threadId: threadIdForSend,
+          project: activeProject,
+          branch: activeThreadBranch!,
+          selections,
+          targets: targets.filter((target): target is MultipleModelTarget => !("error" in target)),
+          sendSnapshot,
+          createdAt: messageCreatedAt,
+          attachmentsPromise: turnAttachmentsPromise ?? prepareAttachments(),
+          usesAttachmentUploads: turnUsesAttachmentUploads,
+          readFileBlockReason: () => readLiveAttachmentCapabilities().fileBlockReason,
+          buildOutgoingMessageContext,
+          isCurrentSend: () => composerSendGenerationRef.current === sendGeneration,
+          draftChangedDuringPreparation: () => false,
+        });
+        if (newDevboxWaitKey !== null) {
+          const waitKey = newDevboxWaitKey;
+          setDevboxSendWaits((current) => {
+            const next = new Map(current);
+            next.delete(waitKey);
+            return next;
+          });
+        }
+        setDevboxClaim({ kind: "idle" });
+        sendInFlightRef.current = false;
+        return;
+      }
+    }
 
     if (sendWaitsForDevbox) {
       const ready = await waitForDevbox(sleepingDevbox, threadIdForSend, {
@@ -1402,7 +1518,7 @@ export function useComposerSend(input: ComposerSendInput) {
             attachments: [],
             idleCompaction: "onReturn",
           },
-          modelSelection: ctxSelectedModelSelection,
+          modelSelection: dispatchModelSelection,
           runtimeMode,
           interactionMode: DEFAULT_INTERACTION_MODE,
         },
@@ -1427,7 +1543,7 @@ export function useComposerSend(input: ComposerSendInput) {
                       runtimeMode,
                       interactionMode: DEFAULT_INTERACTION_MODE,
                       branch: activeThreadBranch,
-                      worktreePath: activeThread.worktreePath,
+                      worktreePath: newDevboxDraft ? null : activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
                     },
                   }
@@ -1471,7 +1587,7 @@ export function useComposerSend(input: ComposerSendInput) {
               ),
             }),
           },
-          modelSelection: ctxSelectedModelSelection,
+          modelSelection: dispatchModelSelection,
           titleSeed: title,
           runtimeMode,
           interactionMode: DEFAULT_INTERACTION_MODE,
@@ -1555,6 +1671,34 @@ export function useComposerSend(input: ComposerSendInput) {
         }
         void recordPromptSent(environmentId);
       }
+    }
+
+    if (newDevboxWaitKey !== null) {
+      const waitKey = newDevboxWaitKey;
+      setDevboxSendWaits((current) => {
+        const next = new Map(current);
+        next.delete(waitKey);
+        return next;
+      });
+      if (failure === null) setDevboxClaim({ kind: "idle" });
+      else
+        setDevboxClaim((current) =>
+          current.kind === "ready" ? { ...current, submitted: false } : current,
+        );
+      if (failure !== null)
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not start thread",
+            description: String(squashAtomCommandFailure(failure)),
+            actionProps: {
+              children: t("Settings → Devboxes"),
+              onClick: () => {
+                void navigate({ to: "/settings/devboxes" });
+              },
+            },
+          }),
+        );
     }
 
     if (failure !== null) {
@@ -1670,7 +1814,10 @@ export function useComposerSend(input: ComposerSendInput) {
   const onSendWithRouting = async (...args: Parameters<typeof onSend>) => {
     args[0]?.preventDefault();
     const refresh =
-      args[3] || sendInFlightRef.current || readPendingEnvironmentChange() !== null
+      args[3] ||
+      devboxClaim.kind !== "idle" ||
+      sendInFlightRef.current ||
+      readPendingEnvironmentChange() !== null
         ? null
         : refreshBeforeSend();
     if (refresh === null) return onSend(...args);
@@ -1699,12 +1846,12 @@ export function useComposerSend(input: ComposerSendInput) {
     (kind: string, current: EnvironmentId, ready: boolean) => {
       if (kind !== "switched" || devboxClaim.kind !== "switched") return;
       if (devboxClaim.environmentId !== current) return;
-      if (devboxClaim.queuedSend && !ready) return;
+      if (devboxClaim.submitted && !ready) return;
       setDevboxClaim({ kind: "idle" });
       toastManager.add(
         stackedThreadToast({ type: "success", title: `Running on ${devboxClaim.name}` }),
       );
-      if (devboxClaim.queuedSend) void sendQueuedDevboxMessage();
+      if (devboxClaim.submitted) void sendQueuedDevboxMessage();
     },
   );
   const abandonQueuedDevboxSend = useEffectEvent(() => {

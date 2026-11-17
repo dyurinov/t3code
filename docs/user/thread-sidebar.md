@@ -22,6 +22,10 @@ a connected one if any is connected.
 When you change a new thread's project, T3 Code stays in the current environment
 if that project exists there. Otherwise it selects an environment that has it.
 
+To start on a fresh remote machine, choose **Run on → New devbox**. Sending adds a
+sidebar entry that shows setup progress. You can work in other chats while it starts;
+if setup fails, your prompt returns to its original draft.
+
 ### Start without a project
 
 A thread does not need a project. To start one without a project, click **or
@@ -165,6 +169,10 @@ section is off. Each device keeps its own choice.
 Choose **Settle thread** from its menu to move finished work out of the active list
 without deleting the conversation. **Un-settle thread** restores it to active work
 and prevents automatic settlement until new activity resumes the usual rules.
+
+You can snooze, settle, or restore cached threads while their environment is offline,
+including a sleeping devbox. Changes are saved on this device and synchronized when
+the environment reconnects; organizing a thread does not wake the machine.
 Manually settling an idle thread dismisses unanswered async questions without
 sending an answer or restarting the agent. Settling also closes the thread's
 terminals that wait at an idle prompt, and keeps their output. A terminal that

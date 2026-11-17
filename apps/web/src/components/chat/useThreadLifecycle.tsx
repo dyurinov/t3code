@@ -54,7 +54,12 @@ import { newMessageId } from "~/lib/utils";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { composerDraftHasUserContent, useComposerDraftStore } from "../../composerDraftStore";
 import { useEnvironmentScope } from "~/state/session";
-import { threadEnvironment } from "../../state/threads";
+import {
+  threadEnvironment,
+  readCanOrganizeThread,
+  useCanOrganizeThread,
+  readThreadOrganizationSupported,
+} from "../../state/threads";
 import { vcsEnvironment } from "../../state/vcs";
 import { useChildThreadInputs, readThreadShell, waitForThreadShell } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
@@ -64,7 +69,10 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import {
+  useOrchestrationCommand,
+  useThreadOrganizationCommand,
+} from "../../state/use-orchestration-command";
 import {
   backgroundWorkNowItem,
   childInputNowItem,
@@ -198,6 +206,8 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   });
 
   const serverConfigLoaded = serverConfig !== null;
+  const canOrganizeThread = useCanOrganizeThread(environmentId);
+  const organizationSupported = readThreadOrganizationSupported(environmentId);
   const activeThreadPinned = serverConfigLoaded && activeThreadShell?.pinnedAt != null;
   // A clock read in render would stay frozen in the compiler's cache, so the
   // snooze checks read a snapshot that moves when the wake time changes or passes.
@@ -206,7 +216,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   ).toISOString();
   const activeThreadSnoozed =
     activeThreadShell !== null &&
-    serverConfigLoaded &&
+    organizationSupported &&
     effectiveSnoozed(activeThreadShell, { now: snoozeClock });
   const activeThreadWokeAt =
     activeThreadShell !== null && serverConfigLoaded
@@ -232,18 +242,14 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     latestRunCompletedAt: activeLatestRun?.completedAt ?? null,
   });
   const activeThreadSettled =
-    serverConfigLoaded && activeThreadShell?.settledOverride === "settled";
-  const unsettleThreadMutation = useOrchestrationCommand(threadEnvironment.unsettle, {
+    organizationSupported && activeThreadShell?.settledOverride === "settled";
+  const unsettleThreadMutation = useThreadOrganizationCommand(threadEnvironment.unsettle, {
     reportFailure: false,
   });
   const [unsettlingThreadKey, setUnsettlingThreadKey] = useState<string | null>(null);
   const isUnsettling = unsettlingThreadKey !== null && unsettlingThreadKey === activeThreadKey;
   const handleUnsettleActiveThread = async () => {
-    if (
-      !activeThreadRef ||
-      !readEnvironmentScope(activeThreadRef.environmentId, AuthOrchestrationOperateScope)
-    )
-      return;
+    if (!activeThreadRef || !readCanOrganizeThread(activeThreadRef.environmentId)) return;
     const threadKey = scopedThreadKey(activeThreadRef);
     setUnsettlingThreadKey(threadKey);
     // Commands settle into a result, so this always runs.
@@ -264,17 +270,13 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     setUnsettlingThreadKey((current) => (current === threadKey ? null : current));
   };
   const handleUnsettleActiveThreadStable = useStableCallback(handleUnsettleActiveThread);
-  const unsnoozeThreadMutation = useOrchestrationCommand(threadEnvironment.unsnooze, {
+  const unsnoozeThreadMutation = useThreadOrganizationCommand(threadEnvironment.unsnooze, {
     reportFailure: false,
   });
   const [unsnoozingThreadKey, setUnsnoozingThreadKey] = useState<string | null>(null);
   const isUnsnoozing = unsnoozingThreadKey !== null && unsnoozingThreadKey === activeThreadKey;
   const handleUnsnoozeActiveThread = async () => {
-    if (
-      !activeThreadRef ||
-      !readEnvironmentScope(activeThreadRef.environmentId, AuthOrchestrationOperateScope)
-    )
-      return;
+    if (!activeThreadRef || !readCanOrganizeThread(activeThreadRef.environmentId)) return;
     const threadKey = scopedThreadKey(activeThreadRef);
     setUnsnoozingThreadKey(threadKey);
     // Commands settle into a result, so this always runs.
@@ -627,7 +629,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
         label={snoozeWake && snoozeWake !== "now" ? `Snoozed, ${snoozeWake} left` : "Snoozed"}
         clockMinute={nowMinute}
         actionLabel={isUnsnoozing ? "Waking..." : "Wake now"}
-        actionDisabled={!canOperateThread || isUnsnoozing}
+        actionDisabled={!canOrganizeThread || isUnsnoozing}
         onAction={() => void handleUnsnoozeActiveThreadStable()}
       />
     )
@@ -637,7 +639,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
       label={settledAt ? `Settled ${formatRelativeTimeLabel(settledAt)}` : "Settled"}
       clockMinute={nowMinute}
       actionLabel={isUnsettling ? "Un-settling..." : "Un-settle"}
-      actionDisabled={!canOperateThread || isUnsettling}
+      actionDisabled={!canOrganizeThread || isUnsettling}
       onAction={() => void handleUnsettleActiveThreadStable()}
     />
   ) : activeThreadWokeVisible ? (
@@ -662,8 +664,8 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     };
   const shortcuts = {
     "thread.settle": () => {
-      if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return false;
-      if (!activeThreadShell || !activeThreadRef || !serverConfigLoaded) return;
+      if (!readCanOrganizeThread(environmentId)) return false;
+      if (!activeThreadShell || !activeThreadRef || !organizationSupported) return;
       if (activeThreadSettled) {
         void handleUnsettleActiveThread();
         return;

@@ -1,3 +1,4 @@
+import { useCanOrganizeThread } from "../../state/threads";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
@@ -820,6 +821,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
+  const canOrganizeThread = useCanOrganizeThread(thread.environmentId);
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
@@ -961,7 +963,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ],
     [canTurnIntoProject, props.titleRegenerationSupported, thread.runtime, isRegeneratingTitle],
   );
-  const menuActions = useMemo<MenuAction[]>(() => {
+  const rawMenuActions = useMemo<MenuAction[]>(() => {
     const nested = Platform.OS === "ios";
     const direct: MenuAction[] = [
       ...(thread.branch
@@ -1045,6 +1047,35 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     thread.branch,
     titleMenuItems,
   ]);
+  const restrictMenu = (actions: readonly MenuAction[]): MenuAction[] =>
+    actions.map((action) => ({
+      ...action,
+      ...(action.subactions
+        ? { subactions: restrictMenu(action.subactions) }
+        : {
+            attributes: {
+              ...action.attributes,
+              disabled:
+                action.attributes?.disabled ||
+                (!canOperateThread &&
+                  ![
+                    "copy-thread",
+                    "copy-thread-id",
+                    "new-thread-on-branch",
+                    "mark-unread",
+                  ].includes(action.id ?? "") &&
+                  !(
+                    canOrganizeThread &&
+                    (action.id === "settle" ||
+                      action.id === "unsettle" ||
+                      action.id === "unsnooze" ||
+                      action.id === "snooze" ||
+                      (action.id ?? "").startsWith("snooze:"))
+                  )),
+            },
+          }),
+    }));
+  const menuActions = canOperateThread ? rawMenuActions : restrictMenu(rawMenuActions);
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
       if (nativeEvent.event === "new-thread-on-branch") onNewThreadOnBranch(thread);
@@ -1177,11 +1208,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : null,
     [handleMenuAction, snoozePresetActions, swipeActions.secondary, thread.title],
   );
-  const swipeAccessibilityHint = !canOperateThread
-    ? "Opens the thread"
-    : secondaryAction === null
-      ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
-      : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
+  const swipeAccessibilityHint =
+    !canOperateThread && !canOrganizeThread
+      ? "Opens the thread"
+      : secondaryAction === null
+        ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
+        : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
 
   const titleTextInset = props.project ? projectIconSize + 8 : 0;
   const cardContent = (
@@ -1575,7 +1607,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       </RowPressable>
     );
 
-  if (!canOperateThread)
+  if (!canOperateThread && !canOrganizeThread)
     return <View style={rowAppearance.swipeContainerStyle}>{rowContent(() => {})}</View>;
 
   return (

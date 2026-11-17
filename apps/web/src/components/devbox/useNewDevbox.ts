@@ -1,30 +1,28 @@
-import { useAtom } from "@effect/atom-react";
-
+import { t } from "gt-react";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { connectPairing } from "../../connection/onboarding";
-import { devboxClaimAtom, devboxEnvironment, useDevboxes } from "../../state/devboxes";
+import { devboxClaims, devboxEnvironment, useDevboxes, useDevboxClaim } from "../../state/devboxes";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
-/**
- * Takes a prepared devbox for the draft: the host hands over a spare (waking it if it
- * sleeps) and this client pairs with it. The toolbar moves the draft once the box's
- * project loads; see `useDevboxDraftSwitch`.
- */
-export function useNewDevbox() {
+/** Claims and pairs a devbox for this draft, including when its composer unmounts. */
+export function useNewDevbox(draftId: string | null) {
   const { hostEnvironmentId, available } = useDevboxes();
   const claim = useAtomCommand(devboxEnvironment.claim, { reportFailure: false });
   const connect = useAtomCommand(connectPairing, { reportFailure: false });
   const pairClient = useAtomCommand(devboxEnvironment.pairClient, { reportFailure: false });
-  const [state, setState] = useAtom(devboxClaimAtom);
+  const [state, setState] = useDevboxClaim(draftId);
 
   const fail = (title: string) => {
-    setState({ kind: "idle" });
+    setState({ kind: "failed", error: title });
     toastManager.add(stackedThreadToast({ type: "error", title }));
   };
 
   const start = async () => {
-    if (hostEnvironmentId === null || state.kind !== "idle") return;
-    setState({ kind: "preparing", queuedSend: false });
+    if (hostEnvironmentId === null || draftId === null) return;
+    const current = appAtomRegistry.get(devboxClaims.stateAtom(draftId));
+    if (current.kind !== "idle" && current.kind !== "failed") return;
+    setState({ kind: "preparing", submitted: false });
     const claimed = await claim({ environmentId: hostEnvironmentId, input: {} });
     if (claimed._tag === "Failure") return fail("Could not prepare a devbox");
     // The pairing code works once, so retry with a fresh one if the first try finds no answer.
@@ -54,13 +52,16 @@ export function useNewDevbox() {
       kind: "ready",
       environmentId: claimed.value.environmentId,
       name: claimed.value.name,
-      queuedSend: current.kind === "idle" ? false : current.queuedSend,
+      submitted: current.kind === "preparing" && current.submitted,
     }));
     // The draft moves once the box lists this project; one that never does must not hang.
     setTimeout(() => {
       let stuck = false;
       setState((current) => {
-        stuck = current.kind === "ready" && current.environmentId === claimed.value.environmentId;
+        stuck =
+          current.kind === "ready" &&
+          !current.submitted &&
+          current.environmentId === claimed.value.environmentId;
         return stuck ? { kind: "idle" } : current;
       });
       if (stuck)
@@ -79,7 +80,8 @@ export function useNewDevbox() {
 
 /** What the Run on control says while a devbox is being taken, or null. */
 export function devboxClaimLabel(state: ReturnType<typeof useNewDevbox>["state"]): string | null {
-  if (state.kind === "preparing") return "Preparing devbox…";
-  if (state.kind === "ready") return `Connecting ${state.name}…`;
+  if (state.kind === "failed") return state.error;
+  if (state.kind === "preparing") return t("Preparing devbox…");
+  if (state.kind === "ready") return t("Connecting {name}…", { name: state.name });
   return null;
 }

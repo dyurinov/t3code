@@ -55,7 +55,10 @@ function sameProviders(
   );
 }
 
-function collectEnvironments(environments: ReadonlyMap<EnvironmentId, ListEnvironment>) {
+function collectEnvironments(
+  environments: ReadonlyMap<EnvironmentId, ListEnvironment>,
+  offlineIds: readonly EnvironmentId[] = [],
+) {
   const providersByEnvironmentId = new Map<EnvironmentId, ReadonlyArray<ThreadListProvider>>();
   const machineByEnvironmentId = new Map<EnvironmentId, EnvironmentMachineKind>();
   // Every protocol-2 server supports these thread actions; they only wait for its config.
@@ -77,8 +80,8 @@ function collectEnvironments(environments: ReadonlyMap<EnvironmentId, ListEnviro
   return {
     providersByEnvironmentId,
     machineByEnvironmentId,
-    settlementEnvironmentIds: loadedEnvironmentIds,
-    snoozeEnvironmentIds: loadedEnvironmentIds,
+    settlementEnvironmentIds: new Set([...loadedEnvironmentIds, ...offlineIds]),
+    snoozeEnvironmentIds: new Set([...loadedEnvironmentIds, ...offlineIds]),
     pinningEnvironmentIds: loadedEnvironmentIds,
     autoSettleOptOutEnvironmentIds,
     pinReorderEnvironmentIds: reorderableEnvironmentIds,
@@ -91,14 +94,18 @@ function collectEnvironments(environments: ReadonlyMap<EnvironmentId, ListEnviro
 export function createThreadListEnvironmentsAtom(
   configsAtom: Atom.Atom<ReadonlyMap<EnvironmentId, ServerConfig>>,
   connectedEnvironmentIdsAtom: Atom.Atom<ReadonlyArray<EnvironmentId>>,
+  offlineEnvironmentIdsAtom?: Atom.Atom<ReadonlyArray<EnvironmentId>>,
 ) {
+  let previousOfflineKey = "";
   let previous = new Map<EnvironmentId, ListEnvironment>();
   let result = collectEnvironments(previous);
   return Atom.make((get) => {
     const configs = get(configsAtom);
+    const offlineIds = offlineEnvironmentIdsAtom ? get(offlineEnvironmentIdsAtom) : [];
+    const offlineKey = offlineIds.join("\n");
     const connectedEnvironmentIds = new Set(get(connectedEnvironmentIdsAtom));
     const next = new Map<EnvironmentId, ListEnvironment>();
-    let changed = configs.size !== previous.size;
+    let changed = configs.size !== previous.size || offlineKey !== previousOfflineKey;
     for (const [id, config] of configs) {
       const selected = selectEnvironment(config, connectedEnvironmentIds.has(id));
       const prior = previous.get(id);
@@ -122,7 +129,8 @@ export function createThreadListEnvironmentsAtom(
     }
     if (changed) {
       previous = next;
-      result = collectEnvironments(next);
+      previousOfflineKey = offlineKey;
+      result = collectEnvironments(next, offlineIds);
     }
     return result;
   }).pipe(Atom.withLabel("thread-list-environments"));

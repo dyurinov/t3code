@@ -9,8 +9,7 @@ import { Input } from "../ui/input";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /**
- * Approve opens the running sign-in's page. Claude's page then shows a code, which goes back to
- * the sign-in from here; Codex finishes in the browser by itself. Key it by `url` so the next
+ * Claude's page returns a code; Codex finishes in the browser. Key by `url` so each
  * sign-in in a batch starts fresh.
  */
 export function DevboxLoginActions({
@@ -27,15 +26,15 @@ export function DevboxLoginActions({
   const [code, setCode] = useState("");
   const [sending, setSending] = useState(false);
 
-  const approve = () => {
+  const openSignIn = () => {
     setOpened(true);
     void readLocalApi()?.shell.openExternal(url);
   };
 
   if (!opened || provider === "codex") {
     return (
-      <Button size="xs" onClick={approve}>
-        {opened ? "Open again" : "Approve"}
+      <Button size="xs" onClick={openSignIn}>
+        {opened ? "Open again" : "Continue sign-in"}
       </Button>
     );
   }

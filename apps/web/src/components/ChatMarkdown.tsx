@@ -1,4 +1,5 @@
 import { clientHostEnvironmentAtom } from "../state/clientHostEnvironment";
+import { Link } from "@tanstack/react-router";
 import { buildFileLinkParentSuffixByPath, fileLinkLabel } from "@t3tools/shared/fileLinks";
 import {
   isWindowsDrivePathHref,
@@ -1170,6 +1171,9 @@ const CHAT_MARKDOWN_COMPONENTS = {
       renderContextReference,
     } = use(ChatMarkdownRendererContext);
     const text = use(ChatMarkdownTextContext);
+    if (href === "/settings/devboxes") {
+      return <Link to="/settings/devboxes">{children}</Link>;
+    }
     const citation = href ? parseAssistantCitationHref(href) : null;
     const before = node?.position?.start.offset;
     const after = node?.position?.end.offset;

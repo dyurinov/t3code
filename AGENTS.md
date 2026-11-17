@@ -87,6 +87,10 @@ The most common defect in this repo is a change that works on the path you teste
 - Run dev servers, Metro, and builds from your own shell so they end with your session. Do not detach them with `systemd-run`, `nohup`, `setsid`, or `tmux` unless the user asks for one that outlives the session. Detached servers ran for weeks and filled RAM and swap. The dev runner stops itself above `--memory-limit-gb` (half of RAM, at most 16 GiB) on Linux.
 - Need a second checkout? `git worktree add` it next to this worktree, not in `/tmp`. Remove it when done.
 
+For rebuilding or restarting this Mac's installed fork, use the shared
+[restart-t3-fork skill](.agents/skills/restart-t3-fork/SKILL.md). It owns the one-time
+restart helper, app backup, and post-restart health check; verify its status after reconnecting.
+
 ## Test data
 
 An empty database is a bad test. Seed your worktree's `.t3` with a copy of real data instead of pointing at live state:

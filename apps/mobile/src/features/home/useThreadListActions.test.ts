@@ -142,6 +142,9 @@ vi.mock("../../state/thread-order", () => ({
   },
 }));
 vi.mock("../../state/threads", () => ({
+  readThreadOrganizationSupported: () => true,
+  readCanOrganizeThread: (id: string) =>
+    state.scopes.get(id)?.has(AuthOrchestrationOperateScope) === true,
   environmentThreadShells: { threadShellsAtom: "thread-shells" },
   steadyNavigationThreadShellsAtom: "thread-shells",
   steadyShellsHoldingAtom: "steady-shells-holding",

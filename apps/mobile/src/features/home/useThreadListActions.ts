@@ -23,6 +23,8 @@ import {
   steadyNavigationThreadShellsAtom,
   steadyShellsHoldingAtom,
   threadEnvironment,
+  readCanOrganizeThread,
+  readThreadOrganizationSupported,
 } from "../../state/threads";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -83,8 +85,17 @@ function actionFailureTitle(action: ThreadListAction): string {
   return "Could not delete thread";
 }
 
-function checkThreadOperationPermission(thread: EnvironmentThreadShell, title: string): boolean {
-  if (readEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope)) return true;
+function checkThreadOperationPermission(
+  thread: EnvironmentThreadShell,
+  title: string,
+  organization = false,
+): boolean {
+  if (
+    organization
+      ? readCanOrganizeThread(thread.environmentId)
+      : readEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope)
+  )
+    return true;
   Dialog.alert(title, "This connection cannot change threads.");
   return false;
 }
@@ -118,7 +129,14 @@ function useThreadActionExecutor(
     onStarted?: () => void,
     restoreUnsettledAt?: string | null,
   ) => {
-    if (!checkThreadOperationPermission(thread, actionFailureTitle(action))) return false;
+    if (
+      !checkThreadOperationPermission(
+        thread,
+        actionFailureTitle(action),
+        action === "settle" || action === "unsettle",
+      )
+    )
+      return false;
     const key = scopedThreadKey(thread.environmentId, thread.id);
     // Drop only a repeat of the latest pending action; Settle → Un-settle → Settle must all send.
     if (latestPendingActions.current.get(key)?.action === action) {
@@ -131,7 +149,7 @@ function useThreadActionExecutor(
     const succeeded = await (async () => {
       if (
         (action === "settle" || action === "unsettle") &&
-        !environmentConfigLoaded(thread.environmentId)
+        !readThreadOrganizationSupported(thread.environmentId)
       ) {
         Dialog.alert(
           actionFailureTitle(action),
@@ -286,7 +304,7 @@ export function useThreadListActions(): {
                 case "snooze": {
                   const failureTitle =
                     action === "Unpinned" ? "Could not undo unpin" : "Could not undo settle";
-                  if (!checkThreadOperationPermission(thread, failureTitle)) return false;
+                  if (!checkThreadOperationPermission(thread, failureTitle, true)) return false;
                   const result = await snoozeMutation({
                     environmentId: thread.environmentId,
                     input: { threadId: thread.id, snoozedUntil: step.snoozedUntil },
@@ -329,14 +347,14 @@ export function useThreadListActions(): {
     return succeeded;
   };
   const snoozeThread = async (thread: EnvironmentThreadShell, snoozedUntil: string) => {
-    if (!checkThreadOperationPermission(thread, "Could not snooze thread")) return false;
+    if (!checkThreadOperationPermission(thread, "Could not snooze thread", true)) return false;
     const key = scopedThreadKey(thread.environmentId, thread.id);
     if (snoozeInFlightThreadKeys.current.has(key)) {
       return false;
     }
     snoozeInFlightThreadKeys.current.add(key);
     const succeeded = await (async () => {
-      if (!environmentConfigLoaded(thread.environmentId)) {
+      if (!readThreadOrganizationSupported(thread.environmentId)) {
         Dialog.alert(
           "Could not snooze thread",
           "This environment's server does not support snoozing yet. Update the server to use Snooze.",
@@ -385,14 +403,14 @@ export function useThreadListActions(): {
     return succeeded;
   };
   const unsnoozeThread = async (thread: EnvironmentThreadShell) => {
-    if (!checkThreadOperationPermission(thread, "Could not wake thread")) return false;
+    if (!checkThreadOperationPermission(thread, "Could not wake thread", true)) return false;
     const key = scopedThreadKey(thread.environmentId, thread.id);
     if (snoozeInFlightThreadKeys.current.has(key)) {
       return false;
     }
     snoozeInFlightThreadKeys.current.add(key);
     const succeeded = await (async () => {
-      if (!environmentConfigLoaded(thread.environmentId)) {
+      if (!readThreadOrganizationSupported(thread.environmentId)) {
         Dialog.alert(
           "Could not wake thread",
           "This environment's server does not support snoozing yet. Update the server to wake this thread.",
@@ -431,8 +449,8 @@ export function useThreadListActions(): {
     restoreUnsettledAt?: string | null,
   ) => (await executeAction("unsettle", thread, undefined, restoreUnsettledAt)) === true;
   const pinThread = async (thread: EnvironmentThreadShell, restoreOrderKey?: string) => {
-    if (!checkThreadOperationPermission(thread, "Could not pin thread")) return false;
-    if (!environmentConfigLoaded(thread.environmentId)) {
+    if (!checkThreadOperationPermission(thread, "Could not pin thread", true)) return false;
+    if (!readThreadOrganizationSupported(thread.environmentId)) {
       Dialog.alert(
         "Could not pin thread",
         "This environment's server does not support pinning yet. Update the server to use Pin.",

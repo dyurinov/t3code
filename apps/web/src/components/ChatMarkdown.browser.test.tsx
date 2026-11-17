@@ -350,6 +350,20 @@ it("highlights a code block's own source when an earlier block of the same lengt
   await vi.waitFor(() => expect(highlightedText(screen.container)).toBe(second));
 });
 
+it("opens the devbox login settings only when its chat link is clicked", async () => {
+  setup();
+  await using screen = await render(
+    <ChatMarkdown
+      cwd="/tmp/project"
+      text="Waiting for a login. [Add devbox logins](/settings/devboxes)"
+    />,
+    { router: "/threads/poem" },
+  );
+  expect(screen.router?.state.location.pathname).toBe("/threads/poem");
+  await userEvent.click(screen.getByRole("link", { name: "Add devbox logins" }));
+  await vi.waitFor(() => expect(screen.router?.state.location.pathname).toBe("/settings/devboxes"));
+});
+
 describe("ChatMarkdown favicon privacy", () => {
   it("suppresses private link images while preserving public links across updates", async () => {
     setup();

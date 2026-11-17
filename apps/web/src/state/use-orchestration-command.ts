@@ -1,3 +1,4 @@
+import { readCanOrganizeThread } from "./threads";
 import type {
   AtomCommand,
   AtomCommandOptions,
@@ -34,4 +35,26 @@ export function useOrchestrationCommand<W extends { readonly environmentId: Envi
     }
     return run(value);
   };
+}
+
+export function useThreadOrganizationCommand<
+  W extends { readonly environmentId: EnvironmentId },
+  A,
+  E,
+>(
+  command: AtomCommand<W, A, E>,
+  options?: string | AtomCommandOptions,
+): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> {
+  const run = useAtomCommand(command, options);
+  return async (value) =>
+    readCanOrganizeThread(value.environmentId)
+      ? run(value)
+      : AsyncResult.failure(
+          Cause.fail(
+            new EnvironmentAuthorizationError({
+              requiredScope: AuthOrchestrationOperateScope,
+              message: ORCHESTRATION_OPERATE_DENIED_MESSAGE,
+            }),
+          ),
+        );
 }

@@ -111,6 +111,9 @@ vi.mock("../state/server", async (importOriginal) => {
   };
 });
 vi.mock("../state/threads", () => ({
+  readThreadOrganizationSupported: () => true,
+  readCanOrganizeThread: (id: string) =>
+    state.scopes.get(id)?.has(AuthOrchestrationOperateScope) === true,
   threadEnvironment: Object.fromEntries(
     [
       "archive",

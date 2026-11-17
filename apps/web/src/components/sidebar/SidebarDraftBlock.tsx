@@ -240,6 +240,7 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   const drafts = (() => {
     const rows: SidebarDraftRowData[] = [];
     for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
+      if (devboxWaits.some((wait) => wait.draftId === draftKey)) continue;
       if (session.promotedTo != null) {
         continue;
       }

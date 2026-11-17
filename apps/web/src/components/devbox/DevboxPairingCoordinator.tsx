@@ -6,7 +6,7 @@ import { environmentCatalog } from "../../connection/catalog";
 import { connectPairing } from "../../connection/onboarding";
 import { clientHostEnvironmentAtom } from "../../state/clientHostEnvironment";
 import {
-  devboxClaimAtom,
+  devboxClaims,
   devboxEnvironment,
   useDevboxes,
   useSettleDevboxWakeRequests,
@@ -42,7 +42,9 @@ export function DevboxPairingCoordinator() {
   const onHost = useAtomValue(clientHostEnvironmentAtom(hostEnvironmentId));
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const { environments } = useEnvironments();
-  const claiming = useAtomValue(devboxClaimAtom).kind !== "idle";
+  const claiming = [...useAtomValue(devboxClaims.claimsAtom).values()].some(
+    (claim) => claim.kind === "preparing",
+  );
   const pairClient = useAtomCommand(devboxEnvironment.pairClient, { reportFailure: false });
   const connect = useAtomCommand(connectPairing, { reportFailure: false });
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {

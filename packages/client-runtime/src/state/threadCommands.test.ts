@@ -34,6 +34,8 @@ import {
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
+import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
+import { createOfflineThreadActions } from "./offlineThreadActions.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 
@@ -663,5 +665,175 @@ describe("remote thread lifecycle commands", () => {
       yield* Deferred.succeed(request.reply, { sequence: 2 });
       expect((yield* Effect.promise(() => result))._tag).toBe("Success");
     }),
+  );
+});
+
+describe("offline thread organization", () => {
+  const offlineHarness = (h: Effect.Success<ReturnType<typeof makeHarness>>, saved?: string) => {
+    let stored = saved ?? null;
+    let nextId = 0;
+    const failures: unknown[] = [];
+    const connected = Atom.make(false);
+    const allowed = Atom.make(true);
+    const offline = createOfflineThreadActions({
+      storage: {
+        load: async () => stored,
+        save: async (_id, value) => {
+          stored = value;
+        },
+        uuid: () => `queued-${++nextId}`,
+        onError: (error) => {
+          failures.push(error);
+        },
+      },
+      snapshotAtom: h.commands.snapshotAtom,
+      connectedAtom: () => connected,
+      allowedAtom: () => allowed,
+      onQueued: () => {},
+    });
+    const settle = offline.wrap("settle", h.commands.settle, (action) => ({
+      threadId: action.threadId,
+      commandId: action.commandId,
+    }));
+    const snooze = offline.wrap("snooze", h.commands.snooze, (action) => ({
+      threadId: action.threadId,
+      commandId: action.commandId,
+      snoozedUntil: action.snoozedUntil!,
+    }));
+    const unsnooze = offline.wrap("unsnooze", h.commands.unsnooze, (action) => ({
+      threadId: action.threadId,
+      commandId: action.commandId,
+      reason: "user" as const,
+    }));
+    const unsettle = offline.wrap("unsettle", h.commands.unsettle, (action) => ({
+      threadId: action.threadId,
+      commandId: action.commandId,
+      reason: "user" as const,
+    }));
+    const visible = offline.snapshotAtom(ENVIRONMENT_ID);
+    h.registry.mount(visible);
+    return {
+      offline,
+      connected,
+      allowed,
+      visible,
+      settle,
+      snooze,
+      unsnooze,
+      unsettle,
+      stored: () => stored,
+      failures,
+    };
+  };
+
+  it.effect(
+    "persists organization without sending or waking the environment, including reversals",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const o = offlineHarness(h);
+        const target = { environmentId: ENVIRONMENT_ID, input: { threadId: THREAD_ID } };
+        yield* Effect.promise(() =>
+          o.snooze.run(h.registry, {
+            ...target,
+            input: { ...target.input, snoozedUntil: DateTime.formatIso(FUTURE) },
+          }),
+        );
+        expect(h.registry.get(o.visible)?.threads[0]?.snoozedUntil).toEqual(FUTURE);
+        yield* Effect.promise(() =>
+          o.unsnooze.run(h.registry, { ...target, input: { ...target.input, reason: "user" } }),
+        );
+        expect(h.registry.get(o.visible)?.threads[0]?.snoozedUntil).toBeNull();
+        yield* Effect.promise(() => o.settle.run(h.registry, target));
+        expect(h.registry.get(o.visible)?.threads[0]?.settledOverride).toBe("settled");
+        yield* Effect.promise(() =>
+          o.unsettle.run(h.registry, { ...target, input: { ...target.input, reason: "user" } }),
+        );
+        expect(h.registry.get(o.visible)?.threads[0]?.settledOverride).toBe("active");
+        expect(yield* Queue.size(h.requests)).toBe(0);
+        expect(JSON.parse(o.stored()!)).toHaveLength(4);
+        expect(o.failures).toEqual([]);
+      }),
+  );
+
+  it.effect(
+    "restores saved changes and delivers them on reconnect with their original command id",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const stored = JSON.stringify([
+          {
+            kind: "settle",
+            commandId: "saved-settle",
+            threadId: THREAD_ID,
+            occurredAt: DateTime.formatIso(NOW),
+          },
+        ]);
+        const o = offlineHarness(h, stored);
+        yield* Effect.promise(() => o.offline.flush(h.registry, ENVIRONMENT_ID));
+        expect(h.registry.get(o.visible)?.threads[0]?.settledOverride).toBe("settled");
+        expect(yield* Queue.size(h.requests)).toBe(0);
+        h.registry.set(o.connected, true);
+        const request = yield* Queue.take(h.requests);
+        expect(request.command).toMatchObject({ type: "thread.settle", commandId: "saved-settle" });
+        const projected = h.registry.get(o.visible)!;
+        h.registry.set(h.snapshotAtom(ENVIRONMENT_ID), { ...projected, snapshotSequence: 2 });
+        yield* Deferred.succeed(request.reply, { sequence: 2 });
+        yield* Effect.promise(() => o.offline.flush(h.registry, ENVIRONMENT_ID));
+        expect(JSON.parse(o.stored()!)).toEqual([]);
+        expect(h.registry.get(o.visible)?.threads[0]?.settledOverride).toBe("settled");
+        expect(o.failures).toEqual([]);
+      }),
+  );
+  it.effect(
+    "retains a queued command through connection loss and reports an authoritative rejection",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const o = offlineHarness(h);
+        const target = { environmentId: ENVIRONMENT_ID, input: { threadId: THREAD_ID } };
+        yield* Effect.promise(() => o.settle.run(h.registry, target));
+        h.registry.set(o.connected, true);
+        const first = yield* Queue.take(h.requests);
+        yield* Deferred.fail(
+          first.reply,
+          new EnvironmentRpcUnavailableError({
+            environmentId: ENVIRONMENT_ID,
+            message: "Connection lost",
+          }),
+        );
+        yield* Effect.promise(() => o.offline.flush(h.registry, ENVIRONMENT_ID));
+        expect(JSON.parse(o.stored()!)).toHaveLength(1);
+        expect(o.failures).toEqual([]);
+        h.registry.set(o.connected, false);
+        h.registry.set(o.connected, true);
+        const retried = yield* Queue.take(h.requests);
+        expect(retried.command.commandId).toBe(first.command.commandId);
+        yield* Deferred.fail(retried.reply, new Error("Cannot settle active work"));
+        yield* Effect.promise(() => o.offline.flush(h.registry, ENVIRONMENT_ID));
+        expect(JSON.parse(o.stored()!)).toEqual([]);
+        expect(h.registry.get(o.visible)?.threads[0]?.settledOverride).not.toBe("settled");
+        expect(o.failures).toEqual([new Error("Cannot settle active work")]);
+      }),
+  );
+
+  it.effect(
+    "does not organize or queue a thread when the connection explicitly denies access",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const o = offlineHarness(h);
+        h.registry.set(o.allowed, false);
+        const result = yield* Effect.promise(() =>
+          o.settle.run(h.registry, {
+            environmentId: ENVIRONMENT_ID,
+            input: { threadId: THREAD_ID },
+          }),
+        );
+        expect(result._tag).toBe("Failure");
+        expect(o.stored()).toBeNull();
+        expect(h.registry.get(o.visible)?.threads[0]?.settledOverride).not.toBe("settled");
+        expect(yield* Queue.size(h.requests)).toBe(0);
+      }),
   );
 });
