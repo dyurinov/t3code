@@ -1,3 +1,4 @@
+import { useGT } from "gt-react";
 import { CircleDashedIcon } from "lucide-react";
 import { memo } from "react";
 
@@ -19,6 +20,7 @@ export const SidebarDevboxSendRow = memo(function SidebarDevboxSendRow(props: {
   onNavigate: (draftId: DraftId) => void;
 }) {
   const { wait, onNavigate } = props;
+  const gt = useGT();
   const accessibility = resolveSidebarRowAccessibility({
     title: wait.title,
     statusLabel: wait.label,
@@ -58,7 +60,7 @@ export const SidebarDevboxSendRow = memo(function SidebarDevboxSendRow(props: {
             </span>
             <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs font-medium text-info-foreground">
               <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
-              Setting up
+              {gt("Setting up")}
             </span>
           </div>
           <div className="mt-0.5 truncate text-sm font-medium text-foreground/90">{wait.title}</div>

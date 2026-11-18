@@ -1,3 +1,4 @@
+import { T, Var, useGT } from "gt-react";
 import type { DevboxLoginPool, EnvironmentId } from "@t3tools/contracts";
 import { useEffect } from "react";
 
@@ -7,12 +8,13 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 
 const PROVIDER_LABELS = { claude: "Claude", codex: "Codex" } as const;
 const BATCH_SIZES = [1, 5] as const;
 
 export function DevboxesSettings() {
+  const gt = useGT();
   const { hostEnvironmentId, available, pools, refresh } = useDevboxes();
   const busy = pools.some((pool) => pool.queued > 0 || pool.pendingUrl !== null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the host does not push sign-in progress; follow a batch while it runs.
@@ -21,6 +23,7 @@ export function DevboxesSettings() {
     const timer = setInterval(refresh, 2_000);
     return () => clearInterval(timer);
   }, [busy, refresh]);
+  const searchableSetting = useSearchableSetting();
   const search = searchableSetting("devbox-sign-in-pool");
 
   return (
@@ -28,14 +31,16 @@ export function DevboxesSettings() {
       <SettingsSection id={search.id} title={search.title}>
         {!available || hostEnvironmentId === null ? (
           <SettingsRow
-            title="Devboxes are not available"
-            description="This machine needs the Coder CLI, signed in, to create devboxes."
+            title={gt("Devboxes are not available")}
+            description={gt("This machine needs the Coder CLI, signed in, to create devboxes.")}
           />
         ) : (
           <>
             <SettingsRow
-              title="How it works"
-              description="Each new devbox takes one Claude and one Codex sign-in from here, so it starts signed in. Add a few ahead of time. Each sign-in opens your browser for approval, one after another."
+              title={gt("How it works")}
+              description={gt(
+                "Each new devbox takes one Claude and one Codex sign-in from here, so it starts signed in. Add a few ahead of time. Each sign-in opens your browser for approval, one after another.",
+              )}
             />
             {pools.map((pool) => (
               <DevboxPoolRow
@@ -58,6 +63,7 @@ function DevboxPoolRow({
   readonly pool: DevboxLoginPool;
   readonly hostEnvironmentId: EnvironmentId;
 }) {
+  const gt = useGT();
   const start = useAtomCommand(devboxEnvironment.startLogin, { reportFailure: false });
   const cancel = useAtomCommand(devboxEnvironment.cancelLogins, { reportFailure: false });
   const label = PROVIDER_LABELS[pool.provider];
@@ -71,7 +77,10 @@ function DevboxPoolRow({
     });
     if (result._tag === "Failure")
       toastManager.add(
-        stackedThreadToast({ type: "error", title: `Could not add ${label} sign-ins` }),
+        stackedThreadToast({
+          type: "error",
+          title: gt("Could not add {label} sign-ins", { label }),
+        }),
       );
   };
 
@@ -91,7 +100,9 @@ function DevboxPoolRow({
           <span>{status}</span>
           {pool.lastError ? <span className="block text-destructive">{pool.lastError}</span> : null}
           {running && pool.pendingUrl === null ? (
-            <span className="block">Starting the next sign-in…</span>
+            <span className="block">
+              <T>Starting the next sign-in…</T>
+            </span>
           ) : null}
         </>
       }
@@ -116,12 +127,14 @@ function DevboxPoolRow({
                 })
               }
             >
-              Cancel
+              <T>Cancel</T>
             </Button>
           ) : (
             BATCH_SIZES.map((count) => (
               <Button key={count} size="xs" variant="outline" onClick={() => void add(count)}>
-                Add {count}
+                <T>
+                  Add <Var>{count}</Var>
+                </T>
               </Button>
             ))
           )}
