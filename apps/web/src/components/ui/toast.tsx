@@ -35,6 +35,7 @@ import {
 } from "./toast.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./tooltip";
 import { useThreadRouteTarget } from "~/hooks/useThreadRouteTarget";
+import { recordClientIssue } from "~/lib/clientIssueReporter";
 
 export type ThreadToastData = {
   threadRef?: ScopedThreadRef | null;
@@ -80,6 +81,21 @@ type ToastManagerEvent = Parameters<ToastManagerListener>[0];
  * from before the first render (and while the root error view replaces the providers), so hold
  * those until a provider listens.
  */
+function recordToastIssue(options: Partial<Parameters<BaseToastManager["add"]>[0]>): void {
+  if (options.type !== "error" && options.type !== "warning") return;
+  if (typeof options.title !== "string" || options.title.length === 0) return;
+  const threadRef = options.data?.threadRef ?? null;
+  recordClientIssue({
+    level: options.type,
+    source: "toast",
+    title: options.title,
+    ...(typeof options.description === "string" ? { description: options.description } : {}),
+    ...(threadRef === null
+      ? {}
+      : { environmentId: threadRef.environmentId, threadId: threadRef.threadId }),
+  });
+}
+
 function createBufferedToastManager(): BaseToastManager {
   const manager = Toast.createToastManager<ThreadToastData>();
   const listeners = new Set<ToastManagerListener>();
@@ -93,6 +109,14 @@ function createBufferedToastManager(): BaseToastManager {
   });
   return {
     ...manager,
+    add(options) {
+      recordToastIssue(options);
+      return manager.add(options);
+    },
+    update(id, options) {
+      if (typeof options !== "function") recordToastIssue(options);
+      manager.update(id, options);
+    },
     " subscribe"(listener) {
       listeners.add(listener);
       for (const event of pending.splice(0)) listener(event);

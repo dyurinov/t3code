@@ -13,6 +13,7 @@ import {
 import { msg, T, useGT, Var } from "gt-react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { recordClientIssue } from "../lib/clientIssueReporter";
 
 import { APP_DISPLAY_NAME, APP_VERSION } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
@@ -250,6 +251,15 @@ function RootRouteErrorView({ error }: ErrorComponentProps) {
   // Router pathname rather than window.location: desktop uses hash history, where the window path is always "/".
   const pathname = useLocation({ select: (location) => location.pathname });
   const report = errorReport(error, pathname);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records the crash once in the host's client issue log, outside React
+  useEffect(() => {
+    recordClientIssue({
+      level: "error",
+      source: "error-screen",
+      title: message,
+      ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
+    });
+  }, [error, message]);
 
   return (
     <StandalonePage>

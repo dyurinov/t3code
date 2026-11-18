@@ -102,6 +102,7 @@ import {
   EnvironmentAuthorizationError,
 } from "./auth.ts";
 import { ClientActivityReportInput } from "./background.ts";
+import { ClientIssue } from "./clientIssue.ts";
 import {
   FilesystemGetMetadataInput,
   FilesystemGetMetadataResult,
@@ -601,6 +602,7 @@ export const WS_METHODS = {
   serverPrepareTriage: "server.prepareTriage",
   serverSignalProcess: "server.signalProcess",
   serverReportClientActivity: "server.reportClientActivity",
+  serverRecordClientIssue: "server.recordClientIssue",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -1178,6 +1180,11 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
 
 const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
   payload: ClientActivityReportInput,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsServerRecordClientIssueRpc = Rpc.make(WS_METHODS.serverRecordClientIssue, {
+  payload: ClientIssue,
   error: EnvironmentAuthorizationError,
 });
 
@@ -2425,6 +2432,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,
+  WsServerRecordClientIssueRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,

@@ -198,6 +198,7 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
+import * as ClientIssueLog from "./diagnostics/ClientIssueLog.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
@@ -326,6 +327,7 @@ const layerResourceDiagnostics = Layer.mergeAll(
   ProcessDiagnostics.layer.pipe(Layer.provide(layerResourceTelemetry)),
   ProcessResourceMonitor.layer.pipe(Layer.provide(layerResourceTelemetry)),
   ProcessGroupMetrics.layer.pipe(Layer.provide(layerResourceTelemetry)),
+  ClientIssueLog.layer,
 );
 
 const layerRelayClient = Layer.unwrap(
