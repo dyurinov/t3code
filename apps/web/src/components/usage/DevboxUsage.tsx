@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import type { DevboxUsageResult, UsageSummaryInput } from "@t3tools/contracts";
 import { formatUsd } from "@t3tools/shared/usageFormat";
 
@@ -38,12 +39,17 @@ export function DevboxUsage({
   if (!available)
     return (
       <p className="text-sm text-muted-foreground">
-        Devboxes need the Coder CLI, signed in, on this machine.
+        <T>Devboxes need the Coder CLI, signed in, on this machine.</T>
       </p>
     );
   if (query.error) return <p className="text-sm text-destructive">{query.error}</p>;
   const usage = query.data;
-  if (!usage) return <p className="text-sm text-muted-foreground">Reading Coder build history…</p>;
+  if (!usage)
+    return (
+      <p className="text-sm text-muted-foreground">
+        <T>Reading Coder build history…</T>
+      </p>
+    );
   return <DevboxUsageView usage={usage} loading={refreshing || query.isPending} />;
 }
 
@@ -54,6 +60,7 @@ function DevboxUsageView({
   readonly usage: DevboxUsageResult;
   readonly loading: boolean;
 }) {
+  const gt = useGT();
   const total = usage.boxes.reduce((sum, box) => sum + box.cost, 0);
   const awake = usage.boxes.reduce((sum, box) => sum + box.awakeHours, 0);
   const asleep = usage.boxes.reduce((sum, box) => sum + box.asleepHours, 0);
@@ -67,30 +74,40 @@ function DevboxUsageView({
               {formatUsd(total)}
             </p>
             <p className="text-xs text-muted-foreground">
-              AWS list-price estimate · {formatUsd(usage.awakeRate)}/h awake ·{" "}
-              {formatUsd(usage.asleepRate * 24)}/day asleep
+              {gt("AWS list-price estimate · {awakeRate}/h awake · {asleepRate}/day asleep", {
+                awakeRate: formatUsd(usage.awakeRate),
+                asleepRate: formatUsd(usage.asleepRate * 24),
+              })}
             </p>
           </div>
           <dl className="grid grid-cols-3 gap-4">
-            <UsageFigure label="Boxes" value={String(usage.boxes.length)} loading={loading} />
-            <UsageFigure label="Awake" value={formatHours(awake)} loading={loading} />
-            <UsageFigure label="Asleep" value={formatHours(asleep)} loading={loading} />
+            <UsageFigure label={gt("Boxes")} value={String(usage.boxes.length)} loading={loading} />
+            <UsageFigure label={gt("Awake")} value={formatHours(awake)} loading={loading} />
+            <UsageFigure label={gt("Asleep")} value={formatHours(asleep)} loading={loading} />
           </dl>
         </div>
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-right text-xs text-muted-foreground">
-              <th className="w-full py-2 pl-2 text-left font-normal">Box</th>
-              <th className="py-2 pl-6 font-normal">Awake</th>
-              <th className="py-2 pl-6 font-normal">Asleep</th>
-              <th className="py-2 pr-2 pl-6 font-normal">Cost</th>
+              <th className="w-full py-2 pl-2 text-left font-normal">
+                <T>Box</T>
+              </th>
+              <th className="py-2 pl-6 font-normal">
+                <T>Awake</T>
+              </th>
+              <th className="py-2 pl-6 font-normal">
+                <T>Asleep</T>
+              </th>
+              <th className="py-2 pr-2 pl-6 font-normal">
+                <T>Cost</T>
+              </th>
             </tr>
           </thead>
           <tbody>
             {usage.boxes.length === 0 ? (
               <tr>
                 <td colSpan={4} className="py-6 text-center text-muted-foreground">
-                  No devboxes in this window.
+                  <T>No devboxes in this window.</T>
                 </td>
               </tr>
             ) : (

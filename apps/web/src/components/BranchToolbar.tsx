@@ -747,7 +747,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   useEffect(() => {
     moveDraftToDevbox(claimedEnvironmentId, claimedListed, environmentId);
   }, [claimedEnvironmentId, claimedListed, environmentId]);
-  const claimLabel = devboxClaimLabel(claim);
+  const claimLabel = devboxClaimLabel(claim, m);
   const shownEnvironments =
     claimLabel === null
       ? availableEnvironments

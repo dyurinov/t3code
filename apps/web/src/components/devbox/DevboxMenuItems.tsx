@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import { RegistryContext } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useContext } from "react";
@@ -17,6 +18,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /** Sleep, wake and delete for an environment that is one of this machine's devboxes. */
 export function DevboxMenuItems({ environmentId }: { readonly environmentId: EnvironmentId }) {
+  const gt = useGT();
   const { hostEnvironmentId, devboxes } = useDevboxes();
   const devbox = devboxForEnvironment(devboxes, environmentId);
   const stop = useAtomCommand(devboxEnvironment.stop, { reportFailure: false });
@@ -32,41 +34,53 @@ export function DevboxMenuItems({ environmentId }: { readonly environmentId: Env
   const target = { environmentId: hostEnvironmentId, input: { name: devbox.name } };
   const deleteDevbox = async () => {
     const confirmed = await ensureLocalApi().dialogs.confirm(
-      `Delete the devbox ${devbox.name}? Its threads and any unpushed work on it are lost.`,
+      gt("Delete the devbox {name}? Its threads and any unpushed work on it are lost.", {
+        name: devbox.name,
+      }),
       { variant: "destructive" },
     );
     if (!confirmed) return;
-    toastManager.add(stackedThreadToast({ type: "info", title: `Deleting ${devbox.name}…` }));
+    toastManager.add(
+      stackedThreadToast({ type: "info", title: gt("Deleting {name}…", { name: devbox.name }) }),
+    );
     const deleted = await remove({
       environmentId: hostEnvironmentId,
       input: { name: devbox.name, force: true },
     });
-    if (deleted._tag === "Failure") return report(`Could not delete ${devbox.name}`)(deleted);
+    if (deleted._tag === "Failure")
+      return report(gt("Could not delete {name}", { name: devbox.name }))(deleted);
     await forget(environmentId);
     registry.refresh(peerLinkEnvironment.list({ environmentId: hostEnvironmentId, input: {} }));
-    toastManager.add(stackedThreadToast({ type: "success", title: `Deleted ${devbox.name}` }));
+    toastManager.add(
+      stackedThreadToast({ type: "success", title: gt("Deleted {name}", { name: devbox.name }) }),
+    );
   };
 
   return (
     <>
       <MenuSeparator />
       {devbox.state === "running" ? (
-        <MenuItem onClick={() => void stop(target).then(report(`Could not stop ${devbox.name}`))}>
-          Sleep devbox
+        <MenuItem
+          onClick={() =>
+            void stop(target).then(report(gt("Could not stop {name}", { name: devbox.name })))
+          }
+        >
+          <T>Sleep devbox</T>
         </MenuItem>
       ) : (
         <MenuItem
           onClick={() =>
             void wake(devbox.name).then(
-              (result) => result && report(`Could not wake ${devbox.name}`)(result),
+              (result) =>
+                result && report(gt("Could not wake {name}", { name: devbox.name }))(result),
             )
           }
         >
-          Wake devbox
+          <T>Wake devbox</T>
         </MenuItem>
       )}
       <MenuItem variant="destructive" onClick={() => void deleteDevbox()}>
-        Delete devbox…
+        <T>Delete devbox…</T>
       </MenuItem>
     </>
   );

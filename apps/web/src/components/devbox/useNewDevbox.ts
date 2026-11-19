@@ -1,3 +1,5 @@
+import { msg, useGT } from "gt-react";
+import { m, type MessageResolver } from "../../i18n/messages";
 import { useAtom } from "@effect/atom-react";
 
 import { connectPairing } from "../../connection/onboarding";
@@ -11,6 +13,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
  * project loads; see `useDevboxDraftSwitch`.
  */
 export function useNewDevbox() {
+  const gt = useGT();
   const { hostEnvironmentId, available } = useDevboxes();
   const claim = useAtomCommand(devboxEnvironment.claim, { reportFailure: false });
   const connect = useAtomCommand(connectPairing, { reportFailure: false });
@@ -26,7 +29,7 @@ export function useNewDevbox() {
     if (hostEnvironmentId === null || state.kind !== "idle") return;
     setState({ kind: "preparing", queuedSend: false });
     const claimed = await claim({ environmentId: hostEnvironmentId, input: {} });
-    if (claimed._tag === "Failure") return fail("Could not prepare a devbox");
+    if (claimed._tag === "Failure") return fail(gt("Could not prepare a devbox"));
     // The pairing code works once, so retry with a fresh one if the first try finds no answer.
     let pairing = claimed.value;
     let connected = await connect({
@@ -49,7 +52,7 @@ export function useNewDevbox() {
       });
     }
     if (connected._tag === "Failure")
-      return fail(`${claimed.value.name} is ready, but connecting to it failed`);
+      return fail(gt("{name} is ready, but connecting to it failed", { name: claimed.value.name }));
     setState((current) => ({
       kind: "ready",
       environmentId: claimed.value.environmentId,
@@ -67,8 +70,10 @@ export function useNewDevbox() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `${claimed.value.name} is connected, but this project is not on it`,
-            description: "Pick it under Run on once its project appears.",
+            title: gt("{name} is connected, but this project is not on it", {
+              name: claimed.value.name,
+            }),
+            description: gt("Pick it under Run on once its project appears."),
           }),
         );
     }, 90_000);
@@ -78,8 +83,11 @@ export function useNewDevbox() {
 }
 
 /** What the Run on control says while a devbox is being taken, or null. */
-export function devboxClaimLabel(state: ReturnType<typeof useNewDevbox>["state"]): string | null {
-  if (state.kind === "preparing") return "Preparing devbox…";
-  if (state.kind === "ready") return `Connecting ${state.name}…`;
+export function devboxClaimLabel(
+  state: ReturnType<typeof useNewDevbox>["state"],
+  resolve: MessageResolver = m,
+): string | null {
+  if (state.kind === "preparing") return resolve(msg("Preparing devbox…"));
+  if (state.kind === "ready") return resolve(msg("Connecting {name}…", { name: state.name }));
   return null;
 }

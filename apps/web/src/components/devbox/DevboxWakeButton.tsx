@@ -1,3 +1,4 @@
+import { useGT } from "gt-react";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -13,6 +14,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
  * Wake for a claimed devbox that sleeps or failed to start, and nothing otherwise.
  */
 export function DevboxWakeButton({ devbox }: { readonly devbox: DevboxSummary }) {
+  const gt = useGT();
   const { hostEnvironmentId } = useDevboxes();
   const wake = useWakeDevbox();
 
@@ -25,8 +27,8 @@ export function DevboxWakeButton({ devbox }: { readonly devbox: DevboxSummary })
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: `Could not wake ${devbox.name}`,
-          description: error instanceof Error ? error.message : "Waking failed.",
+          title: gt("Could not wake {name}", { name: devbox.name }),
+          description: error instanceof Error ? error.message : gt("Waking failed."),
         }),
       );
     }
@@ -34,7 +36,7 @@ export function DevboxWakeButton({ devbox }: { readonly devbox: DevboxSummary })
   return (
     <Button size="xs" variant="outline" onClick={() => void onWake()}>
       <PowerIcon aria-hidden />
-      {devbox.state === "failed" ? "Try again" : "Wake"}
+      {devbox.state === "failed" ? gt("Try again") : gt("Wake")}
     </Button>
   );
 }
