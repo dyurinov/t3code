@@ -25,7 +25,7 @@ export function startHostFreezeToasts(): () => void {
           config.environment.label;
         const notice = hostFreezeNotice(label, stall, m);
         if (notice !== null) {
-          toastManager.add({ type: "warning", ...notice });
+          toastManager.add({ type: "warning", ...notice, data: { environmentId } });
         }
       }
     },

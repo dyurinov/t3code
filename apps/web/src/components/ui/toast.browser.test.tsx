@@ -2,11 +2,24 @@ import { describe, expect, it } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 
 import { render } from "../../../test/render";
+import { EnvironmentId } from "@t3tools/contracts";
 import { AnchoredToastProvider, ToastProvider, toastManager } from "./toast";
 
 describe("toastManager", () => {
   it("shows a toast added before any provider mounted", async () => {
-    toastManager.add({ type: "info", title: "Raised before the first render" });
+    toastManager.add({
+      type: "warning",
+      title: "Raised before the first render",
+      data: { environmentId: EnvironmentId.make("frozen-host") },
+    });
+    expect(
+      JSON.parse(sessionStorage.getItem("t3code:pending-client-issues") ?? "[]"),
+    ).toContainEqual(
+      expect.objectContaining({
+        title: "Raised before the first render",
+        environmentId: "frozen-host",
+      }),
+    );
 
     await using _screen = await render(<ToastProvider>{null}</ToastProvider>);
 

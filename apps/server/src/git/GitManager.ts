@@ -2789,25 +2789,16 @@ export const make = Effect.gen(function* () {
     } else if (!localBranchExists) {
       const trackingRemotes = yield* remember(
         `trackingRemotes\u0000${branch}`,
-        gitCore
-          .execute({
-            operation: "GitManager.branchPullRequest.remoteTrackingRefs",
-            cwd: cacheCwd,
-            args: ["for-each-ref", "--format=%(refname)", "refs/remotes"],
-          })
-          .pipe(
-            Effect.map((trackingRefs) => {
-              const refNames = new Set(
-                trackingRefs.stdout
-                  .split("\n")
-                  .map((remoteRef) => remoteRef.trim())
-                  .filter((remoteRef) => remoteRef.length > 0),
-              );
-              return remoteNames
-                .filter((candidate) => refNames.has(`refs/remotes/${candidate}/${branch}`))
-                .join("\n");
+        Effect.filter(
+          remoteNames,
+          (candidate) =>
+            gitCore.remoteBranchExists({
+              cwd: cacheCwd,
+              remoteName: candidate,
+              refName: branch,
             }),
-          ),
+          { concurrency: 4 },
+        ).pipe(Effect.map((matching) => matching.join("\n"))),
       );
       const matchingRemoteNames = (trackingRemotes ?? "")
         .split("\n")

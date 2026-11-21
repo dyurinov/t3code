@@ -1397,6 +1397,16 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["push", "-u", "team/fork", "feature/deleted-fork-branch"]);
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "feature/deleted-fork-branch"]);
+      const { stdout: commit } = yield* runGit(repoDir, ["rev-parse", "HEAD"]);
+      NodeFS.writeFileSync(
+        NodePath.join(repoDir, ".git", "packed-refs"),
+        "# pack-refs with: peeled\n" +
+          Array.from(
+            { length: 8_000 },
+            (_, index) =>
+              `${commit.trim()} refs/remotes/origin/unrelated-${String(index).padStart(5, "0")}-${"x".repeat(105)}\n`,
+          ).join(""),
+      );
       yield* configureVisibleRemoteUrlWithLocalRewrite(
         repoDir,
         "origin",

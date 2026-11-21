@@ -10,7 +10,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { type ScopedThreadRef, type ThreadId } from "@t3tools/contracts";
+import { type EnvironmentId, type ScopedThreadRef, type ThreadId } from "@t3tools/contracts";
 import {
   CircleAlertIcon,
   CircleCheckIcon,
@@ -38,6 +38,7 @@ import { useThreadRouteTarget } from "~/hooks/useThreadRouteTarget";
 import { recordClientIssue } from "~/lib/clientIssueReporter";
 
 export type ThreadToastData = {
+  environmentId?: EnvironmentId;
   threadRef?: ScopedThreadRef | null;
   threadId?: ThreadId | null;
   leadingIcon?: ReactNode;
@@ -85,14 +86,14 @@ function recordToastIssue(options: Partial<Parameters<BaseToastManager["add"]>[0
   if (options.type !== "error" && options.type !== "warning") return;
   if (typeof options.title !== "string" || options.title.length === 0) return;
   const threadRef = options.data?.threadRef ?? null;
+  const environmentId = threadRef?.environmentId ?? options.data?.environmentId;
   recordClientIssue({
     level: options.type,
     source: "toast",
     title: options.title,
     ...(typeof options.description === "string" ? { description: options.description } : {}),
-    ...(threadRef === null
-      ? {}
-      : { environmentId: threadRef.environmentId, threadId: threadRef.threadId }),
+    ...(environmentId === undefined ? {} : { environmentId }),
+    ...(threadRef === null ? {} : { threadId: threadRef.threadId }),
   });
 }
 
