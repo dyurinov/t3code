@@ -17,6 +17,7 @@ import * as NetService from "@t3tools/shared/Net";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { ServerActivation } from "../serverActivation.ts";
@@ -92,6 +93,7 @@ const setup = Effect.fn("test.setup")(function* (
         ServerConfig.layerTest("/checkout", "/state").pipe(Layer.provide([filesystem, Path.layer])),
         Layer.mock(ServerEnvironment.ServerEnvironment)({}),
         Layer.mock(PeerLinks.PeerLinks)({}),
+        Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
         Layer.mock(ServerSecretStore.ServerSecretStore)({
           get: () => Effect.succeedNone,
         }),

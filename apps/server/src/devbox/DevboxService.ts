@@ -48,6 +48,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProviderCredentialStore from "../provider/ProviderCredentialStore.ts";
@@ -64,6 +65,8 @@ import {
   PROVISION_REVISION,
   PROVISION_SCRIPT,
   REMOTE_T3_PORT,
+  HOST_PORT_ON_BOX,
+  LINK_TOKEN_SCRIPT,
   SIBLING_REMOVE_SCRIPT,
   SIBLING_SCRIPT,
   parseCoderList,
@@ -210,6 +213,7 @@ export class DevboxService extends Context.Service<
 >()("t3/devbox/DevboxService") {}
 
 const PORT_BASE = 13800;
+const HOST_LINK_ACCESS = "auto";
 const KEEP_ALIVE_INTERVAL = Duration.minutes(10);
 const LOGIN_SYNC_INTERVAL = Duration.minutes(10);
 const KEEP_ALIVE_EXTENSION = "1h";
@@ -226,6 +230,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const peerLinks = yield* PeerLinks.PeerLinks;
+  const auth = yield* EnvironmentAuth.EnvironmentAuth;
   const logins = yield* DevboxLogins.DevboxLogins;
   const httpClient = yield* HttpClient.HttpClient;
   const net = yield* NetService.NetService;
@@ -456,7 +461,7 @@ export const make = Effect.gen(function* () {
   }).pipe(Effect.withSpan("DevboxService.list"));
 
   // ── tunnel and link ──────────────────────────────────────────────────────
-  const forward = (record: DevboxRecord) =>
+  const sshForward = (record: DevboxRecord, spec: ReadonlyArray<string>) =>
     run(
       "ssh",
       [
@@ -469,19 +474,24 @@ export const make = Effect.gen(function* () {
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
-        "-L",
-        `127.0.0.1:${record.localPort}:127.0.0.1:${REMOTE_T3_PORT}`,
+        ...spec,
         `coder.${record.name}`,
       ],
       { timeout: Duration.infinity },
     ).pipe(
       Effect.tapError((error) =>
-        Effect.logWarning("devbox forward exited", { name: record.name, error }),
+        Effect.logWarning("devbox forward exited", { name: record.name, spec, error }),
       ),
       // The forward lives while the box runs; a stopped box ends it until the next wake.
       Effect.retry(Schedule.spaced("5 seconds")),
       Effect.ignore,
     );
+  const forward = (record: DevboxRecord) =>
+    sshForward(record, ["-L", `127.0.0.1:${record.localPort}:127.0.0.1:${REMOTE_T3_PORT}`]);
+  // Separate from `forward`: a box port still held by an old session must not take down the
+  // forward this machine depends on.
+  const reverse = (record: DevboxRecord) =>
+    sshForward(record, ["-R", `127.0.0.1:${HOST_PORT_ON_BOX}:127.0.0.1:${config.port}`]);
   // Only this box's own environment counts: another box (or T3) may hold the port.
   const answersHere = (record: DevboxRecord) =>
     record.environmentId === null
@@ -498,9 +508,17 @@ export const make = Effect.gen(function* () {
   const startTunnel = (record: DevboxRecord) =>
     answersHere(record).pipe(
       Effect.flatMap((up) =>
-        up
-          ? Effect.void
-          : FiberMap.run(tunnels, record.name, forward(record), { onlyIfMissing: true }),
+        FiberMap.run(
+          tunnels,
+          record.name,
+          up
+            ? reverse(record)
+            : Effect.all([forward(record), reverse(record)], {
+                concurrency: "unbounded",
+                discard: true,
+              }),
+          { onlyIfMissing: true },
+        ),
       ),
       Effect.andThen(
         waitForHttpReady({
@@ -654,6 +672,52 @@ export const make = Effect.gen(function* () {
       { concurrency: 4, discard: true },
     );
   });
+
+  /** Links the box to this machine over the reverse forward, so its agents can work here. */
+  const linkHost = Effect.fn("DevboxService.linkHost")(
+    function* (record: DevboxRecord) {
+      const self = yield* environment.getDescriptor;
+      const url = `http://127.0.0.1:${HOST_PORT_ON_BOX}`;
+      const token = lastLine(yield* ssh(record.name, "sh -s", LINK_TOKEN_SCRIPT));
+      yield* boxRpc(record, token, (client) =>
+        Effect.gen(function* () {
+          const { links } = yield* client[WS_METHODS.peerLinksList]({});
+          const existing = links.find((entry) => entry.environmentId === self.environmentId);
+          if (
+            existing !== undefined &&
+            existing.status !== "expired" &&
+            existing.access === HOST_LINK_ACCESS &&
+            existing.urls.includes(url)
+          )
+            return;
+          if (existing !== undefined)
+            yield* client[WS_METHODS.peerLinksUnlink]({ environmentId: self.environmentId });
+          const { credential } = yield* auth.issuePairingCredential({
+            access: HOST_LINK_ACCESS,
+            purpose: "peer-link",
+            label: `Link · ${record.name}`,
+          });
+          const linked = yield* client[WS_METHODS.peerLinksLink]({
+            url,
+            pairingCode: credential,
+            access: HOST_LINK_ACCESS,
+            expectedLabel: self.label,
+          });
+          if (linked.environmentId !== self.environmentId) {
+            yield* client[WS_METHODS.peerLinksUnlink]({ environmentId: linked.environmentId });
+            return yield* new DevboxError({
+              reason: "link",
+              message: `${url} on ${record.name} answered as ${linked.label}, not this machine.`,
+            });
+          }
+          yield* Effect.logInfo("devbox linked to this machine", { name: record.name });
+        }),
+      );
+    },
+    // The reverse forward starts with the tunnel and may not be listening yet.
+    Effect.retry({ times: 5, schedule: Schedule.spaced("5 seconds") }),
+    Effect.mapError(devboxError("link")),
+  );
 
   /** Removes every running box's tunnel and link to a box that is going away. */
   const unlinkSiblings = Effect.fn("DevboxService.unlinkSiblings")(function* (gone: DevboxRecord) {
@@ -1068,6 +1132,19 @@ export const make = Effect.gen(function* () {
             linkSiblings(stored.name).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("devbox sibling links failed", { name: stored.name, cause }),
+              ),
+            ),
+          ),
+        ),
+        Effect.tap((record) =>
+          FiberSet.run(
+            background,
+            linkHost(record).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("devbox link to this machine failed", {
+                  name: stored.name,
+                  cause,
+                }),
               ),
             ),
           ),

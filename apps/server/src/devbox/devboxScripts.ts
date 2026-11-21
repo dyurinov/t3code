@@ -87,6 +87,8 @@ export function parsePairingToken(stdout: string): string | undefined {
 
 const REMOTE_T3_PORT = 3773;
 export { REMOTE_T3_PORT };
+/** Where this machine's T3 server answers on a box, through the reverse SSH forward. */
+export const HOST_PORT_ON_BOX = 13799;
 
 /** Reads the host's Council skill and personal instructions as JSON on stdin. */
 export const INSTALL_PERSONALIZATION_SCRIPT = String.raw`import json, os, pathlib, sys, tempfile
@@ -271,6 +273,8 @@ export const PAIR_SCRIPT = String.raw`set -eu
 /** Prints, as the last line, a 5-minute bearer token that may list and change the box's links. */
 const LINK_TOKEN = String.raw`"$HOME/.t3/runtime/current/t3" auth session issue --base-dir "$HOME/.t3" --scope access:read --scope access:write --ttl 5m --label "T3 devbox links" --token-only
 `;
+
+export const LINK_TOKEN_SCRIPT = "set -eu\n" + LINK_TOKEN;
 
 /**
  * Runs on a box as `sh -s -- <sibling> <port>`: the sibling's T3 server answers at
