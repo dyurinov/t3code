@@ -37,7 +37,7 @@ const DevboxListTool = Tool.make("devbox_list", {
 const DevboxCreateTool = Tool.make("devbox_create", {
   ...shared,
   description:
-    "Get a Coder devbox for one task: claims a prepared spare and starts its replacement, or creates a box if none fits. Use this, not a devbox CLI or `coder create`: only boxes made here link to T3. Returns at once; call devbox_wait. If loginRequired is set or both credentials are pool-empty, tell the user the task is waiting and show [Add devbox logins](/settings/devboxes) in chat. Keep waiting with devbox_wait until a login is installed. Open Settings only when the user clicks the link. One box per task; no worktrees on boxes.",
+    "Get a Coder devbox for one task: claims a prepared spare and starts its replacement, or creates a box if none fits. Use this, not a devbox CLI or `coder create`: only boxes made here link to T3. Returns at once; call devbox_wait. If loginRequired is set or both credentials are no-login, tell the user the task is waiting and show [Sign in for devboxes](/settings/devboxes) in chat. Keep waiting with devbox_wait until a login is installed. Open Settings only when the user clicks the link. One box per task; no worktrees on boxes.",
   parameters: DevboxCreateInput,
   success: DevboxSummary,
 })
@@ -48,7 +48,7 @@ const DevboxCreateTool = Tool.make("devbox_create", {
 const DevboxWaitTool = Tool.make("devbox_wait", {
   ...shared,
   description:
-    "Wait up to `seconds` (default 240) for a devbox to finish setup and receive an agent login. Ready means running with an environmentId and an installed credential. If loginRequired is set, show [Add devbox logins](/settings/devboxes) in chat and tell the user the task is waiting; keep calling this tool until a login is installed. Do not open Settings or a login browser automatically. Report lastError instead of retrying failed setup indefinitely.",
+    "Wait up to `seconds` (default 240) for a devbox to finish setup and receive an agent login. Ready means running with an environmentId and an installed credential. If loginRequired is set, show [Sign in for devboxes](/settings/devboxes) in chat and tell the user the task is waiting; keep calling this tool until a login is installed. Do not open Settings or a login browser automatically. When credentials are only `unbound` or `no-login`, with one `unbound`, the box lacks Formal for a sealed token: tell the user to sign in to Formal on the box rather than waiting. Report lastError instead of retrying failed setup indefinitely.",
   parameters: Schema.Struct({
     ...DevboxNameInput.fields,
     seconds: Schema.optionalKey(Schema.Number.annotate({ description: "At most 280." })),
@@ -81,7 +81,7 @@ const DevboxStopTool = Tool.make("devbox_stop", {
 const DevboxDeleteTool = Tool.make("devbox_delete", {
   ...shared,
   description:
-    "Delete a devbox, its environment link and its logins. Its threads and any unpushed work are lost; push first. Refuses while a turn runs unless `force`.",
+    "Delete a devbox and its environment link. Its threads and any unpushed work are lost; push first. Refuses while a turn runs unless `force`.",
   parameters: DevboxDeleteInput,
   success: DevboxDeleteResult,
 })

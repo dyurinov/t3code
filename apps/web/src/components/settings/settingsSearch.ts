@@ -1078,10 +1078,10 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/scheduled-tasks",
   },
   {
-    id: "devbox-sign-in-pool",
-    title: msg("Sign-in pool"),
+    id: "devbox-sign-ins",
+    title: msg("Devbox sign-ins"),
     to: "/settings/devboxes",
-    searchTerms: ["devbox coder claude codex login account batch add approve"],
+    searchTerms: ["devbox coder claude codex login account sign in formal token"],
   },
   {
     id: "agent-browser-access",

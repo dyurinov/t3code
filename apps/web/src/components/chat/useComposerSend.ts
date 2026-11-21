@@ -1911,28 +1911,43 @@ export function useComposerSend(input: ComposerSendInput) {
       if (devboxClaim.submitted) void sendQueuedDevboxMessage();
     },
   );
-  const abandonQueuedDevboxSend = useEffectEvent(() => {
-    if (devboxClaim.kind !== "switched") return;
-    setDevboxClaim({ kind: "idle" });
-    toastManager.add(
-      stackedThreadToast({
-        type: "warning",
-        title: m(msg("{name} has no provider ready"), { name: devboxClaim.name }),
-        description: m(
-          msg(
-            "Your message stays here. Add sign-ins in Settings → Devboxes; the box picks them up, then send.",
-          ),
-        ),
-      }),
-    );
-  });
-  // The host knows a box got no sign-ins at all; waiting for a provider would be in vain.
+  // The host knows when waiting is in vain: no sign-in at all, or no Formal on the box.
+  // `not-installed` can still arrive on the next delivery, so it keeps the normal wait.
   const claimedDevbox = devboxForEnvironment(devboxes, environmentId);
   const devboxWithoutLogins =
     claimedDevbox !== null &&
     claimedDevbox.state === "running" &&
-    claimedDevbox.credentials.claude !== "installed" &&
-    claimedDevbox.credentials.codex !== "installed";
+    (["claude", "codex"] as const).every((provider) => {
+      const state = claimedDevbox.credentials[provider];
+      return state === "no-login" || state === "unbound";
+    });
+  const abandonQueuedDevboxSend = useEffectEvent(() => {
+    if (devboxClaim.kind !== "switched") return;
+    setDevboxClaim({ kind: "idle" });
+    // A sealed sign-in only works with Formal on the box, which only the user can fix there.
+    const needsFormal =
+      claimedDevbox?.credentials.claude === "unbound" ||
+      claimedDevbox?.credentials.codex === "unbound";
+    toastManager.add(
+      stackedThreadToast({
+        type: "warning",
+        title: needsFormal
+          ? m(msg("{name} has no Formal sign-in"), { name: devboxClaim.name })
+          : m(msg("{name} has no provider ready"), { name: devboxClaim.name }),
+        description: needsFormal
+          ? m(
+              msg(
+                "Your message stays here. Sign in to Formal on the box; it gets its token within 10 minutes, then send.",
+              ),
+            )
+          : m(
+              msg(
+                "Your message stays here. Sign in under Settings → Devboxes; the box picks it up, then send.",
+              ),
+            ),
+      }),
+    );
+  });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the draft and its provider status arrive asynchronously from the devbox's environment.
   useEffect(() => {
     finishDevboxClaim(devboxClaim.kind, environmentId, devboxProviderReady);

@@ -1,10 +1,5 @@
 import { createDevboxEnvironmentAtoms } from "@t3tools/client-runtime/state/devboxes";
-import type {
-  DeletedDevbox,
-  DevboxLoginPool,
-  DevboxSummary,
-  EnvironmentId,
-} from "@t3tools/contracts";
+import type { DeletedDevbox, DevboxLogin, DevboxSummary, EnvironmentId } from "@t3tools/contracts";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
@@ -36,7 +31,8 @@ export function useDevboxes(): {
   readonly devboxes: ReadonlyArray<DevboxSummary>;
   /** As the host reports them, before this client's pending wakes. */
   readonly listedDevboxes: ReadonlyArray<DevboxSummary>;
-  readonly pools: ReadonlyArray<DevboxLoginPool>;
+  /** This machine's sign-ins, which every devbox gets its access tokens from. */
+  readonly logins: ReadonlyArray<DevboxLogin>;
   /** Boxes T3 deleted; their saved environments are dead ends. */
   readonly deleted: ReadonlyArray<DeletedDevbox>;
   readonly refresh: () => void;
@@ -57,7 +53,7 @@ export function useDevboxes(): {
         ? { ...devbox, state: "starting" as const }
         : devbox,
     ),
-    pools: query.data?.pools ?? [],
+    logins: query.data?.logins ?? [],
     deleted: query.data?.deleted ?? [],
     refresh: query.refresh,
   };
@@ -112,7 +108,9 @@ export function devboxStatusLabel(devbox: DevboxSummary): string | null {
   if (devbox.spare) return "Spare. New devbox takes it next.";
   switch (devbox.state) {
     case "running":
-      return null;
+      return devbox.credentials.claude === "unbound" || devbox.credentials.codex === "unbound"
+        ? "Needs a Formal sign-in on the box."
+        : null;
     case "stopped":
       return "Sleeping. Wake it to use it here.";
     case "starting":

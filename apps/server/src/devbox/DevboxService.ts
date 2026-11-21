@@ -12,7 +12,7 @@ import {
   type DeletedDevbox,
   type DevboxClientPairing,
   type DevboxCreateInput,
-  type DevboxLoginPool,
+  type DevboxLogin,
   type DevboxLoginProvider,
   type DevboxCredentialState,
   type DevboxState,
@@ -52,12 +52,14 @@ import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProviderCredentialStore from "../provider/ProviderCredentialStore.ts";
 import { forkParked } from "../serverActivation.ts";
-import * as DevboxCredentialPool from "./DevboxCredentialPool.ts";
+import * as DevboxLogins from "./DevboxLogins.ts";
 import { environmentRpc } from "./devboxRpc.ts";
 import {
   ACTIVE_RUN_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
   INSTALL_CURSOR_SCRIPT,
+  INSTALL_PERSONALIZATION_SCRIPT,
+  REFRESH_LOGIN_SCRIPT,
   PAIR_SCRIPT,
   PROVISION_REVISION,
   PROVISION_SCRIPT,
@@ -86,9 +88,10 @@ const DevboxRecord = Schema.Struct({
   environmentId: Schema.NullOr(Schema.String),
   task: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
+  // `pool-empty` is what the per-box login pool wrote; it reads as `no-login`.
   credentials: Schema.Struct({
-    claude: Schema.Literals(["installed", "pool-empty", "not-installed"]),
-    codex: Schema.Literals(["installed", "pool-empty", "not-installed"]),
+    claude: Schema.Literals(["installed", "not-installed", "no-login", "unbound", "pool-empty"]),
+    codex: Schema.Literals(["installed", "not-installed", "no-login", "unbound", "pool-empty"]),
   }),
   /** Prepared ahead of time, waiting for `claim`. */
   spare: Schema.optionalKey(Schema.Boolean),
@@ -135,10 +138,23 @@ const decodeCursorCredentials = Schema.decodeUnknownEffect(
 const decodeDescriptorId = (value: unknown) =>
   decodeDescriptor(value).pipe(Effect.map((descriptor) => descriptor.environmentId));
 
-interface LoginQueue {
-  readonly queued: number;
-  readonly lastError: string | null;
-}
+const decodeRelayOutput = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      response: Schema.optionalKey(Schema.Unknown),
+      error: Schema.optionalKey(Schema.Literals(["unbound", "rejected", "unreachable"])),
+      status: Schema.optionalKey(Schema.Number),
+    }),
+  ),
+);
+const decodeInstallResult = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      claude: Schema.optionalKey(Schema.Literals(["installed", "unbound", "failed"])),
+      codex: Schema.optionalKey(Schema.Literals(["installed", "unbound", "failed"])),
+    }),
+  ),
+);
 
 interface Transient {
   readonly state: DevboxState;
@@ -149,15 +165,13 @@ export class DevboxService extends Context.Service<
   DevboxService,
   {
     readonly list: Effect.Effect<ReadonlyArray<DevboxSummary>, DevboxError>;
-    /** Each provider's pool of sign-ins for new boxes. */
-    readonly pools: Effect.Effect<ReadonlyArray<DevboxLoginPool>>;
-    /** Queues `count` sign-ins for `provider`; they run one at a time, each waiting for approval. */
-    readonly startLogin: (
-      provider: DevboxLoginProvider,
-      count: number,
-    ) => Effect.Effect<DevboxLoginPool>;
-    /** Drops the queued sign-ins and stops the one waiting for approval. */
-    readonly cancelLogins: (provider: DevboxLoginProvider) => Effect.Effect<DevboxLoginPool>;
+    /** This machine's sign-in per provider, which every devbox gets an access token from. */
+    readonly logins: Effect.Effect<ReadonlyArray<DevboxLogin>>;
+    /** Starts signing in, replacing the current sign-in once the browser approves it. */
+    readonly startLogin: (provider: DevboxLoginProvider) => Effect.Effect<DevboxLogin>;
+    readonly cancelLogin: (provider: DevboxLoginProvider) => Effect.Effect<DevboxLogin>;
+    /** Forgets the sign-in. Boxes keep the access token they hold until it runs out. */
+    readonly signOut: (provider: DevboxLoginProvider) => Effect.Effect<DevboxLogin>;
     readonly submitLoginCode: (
       provider: "claude" | "codex",
       code: string,
@@ -197,6 +211,7 @@ export class DevboxService extends Context.Service<
 
 const PORT_BASE = 13800;
 const KEEP_ALIVE_INTERVAL = Duration.minutes(10);
+const LOGIN_SYNC_INTERVAL = Duration.minutes(10);
 const KEEP_ALIVE_EXTENSION = "1h";
 const CREATE_TIMEOUT = Duration.minutes(60);
 const SSH_NOISE = /startup script|troubleshooting|incomplete/iu;
@@ -211,7 +226,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const peerLinks = yield* PeerLinks.PeerLinks;
-  const pool = yield* DevboxCredentialPool.DevboxCredentialPool;
+  const logins = yield* DevboxLogins.DevboxLogins;
   const httpClient = yield* HttpClient.HttpClient;
   const net = yield* NetService.NetService;
 
@@ -242,10 +257,16 @@ export const make = Effect.gen(function* () {
   const creations = yield* FiberMap.make<string>();
   const background = yield* FiberSet.make();
   const loginWorkers = yield* FiberMap.make<DevboxLoginProvider>();
-  const loginQueues = yield* Ref.make<Record<DevboxLoginProvider, LoginQueue>>({
-    claude: { queued: 0, lastError: null },
-    codex: { queued: 0, lastError: null },
+  const loginErrors = yield* Ref.make<Record<DevboxLoginProvider, string | null>>({
+    claude: null,
+    codex: null,
   });
+  // The access tokens each box last got, so the sync only writes to boxes that are behind.
+  const pushed = new Map<string, string>();
+  // The last renewal outcomes, so a box left with no usable token says why: the provider
+  // refused the sign-in (user signs in again), or the box has no Formal (user binds it).
+  const refused = new Set<DevboxLoginProvider>();
+  const unboundBoxes = new Set<string>();
 
   const devboxError = (reason: DevboxError["reason"]) => (cause: unknown) =>
     new DevboxError({ reason, message: errorText(cause) });
@@ -255,6 +276,8 @@ export const make = Effect.gen(function* () {
     Effect.flatMap(decodeFile),
     Effect.orElseSucceed((): typeof DevboxFile.Type => ({ devboxes: [] })),
   );
+  // Snapshot, write and rename as one step: two saves at once would share the temp file.
+  const storeLock = yield* Semaphore.make(1);
   const save = Effect.fn("DevboxService.save")(
     function* () {
       const current = yield* Ref.get(records);
@@ -268,6 +291,7 @@ export const make = Effect.gen(function* () {
       yield* fs.writeFileString(`${storePath}.tmp`, text);
       yield* fs.rename(`${storePath}.tmp`, storePath);
     },
+    (effect) => storeLock.withPermits(1)(effect),
     Effect.mapError(devboxError("storage")),
   );
   const putRecord = (record: DevboxRecord) =>
@@ -402,9 +426,13 @@ export const make = Effect.gen(function* () {
     spare: record.spare === true,
     createdAt: record.createdAt,
     deadline: workspace?.latest_build.deadline ?? null,
-    credentials: record.credentials,
+    credentials: {
+      claude: shownCredential(record.credentials.claude),
+      codex: shownCredential(record.credentials.codex),
+    },
     loginRequired:
-      record.credentials.claude === "pool-empty" && record.credentials.codex === "pool-empty"
+      shownCredential(record.credentials.claude) === "no-login" &&
+      shownCredential(record.credentials.codex) === "no-login"
         ? {
             settingsUrl: "/settings/devboxes",
           }
@@ -665,41 +693,291 @@ export const make = Effect.gen(function* () {
   });
 
   // ── provisioning ─────────────────────────────────────────────────────────
-  const installCredentials = Effect.fn("DevboxService.installCredentials")(function* (
-    record: DevboxRecord,
+  const readPersonalFile = Effect.fn("DevboxService.readPersonalFile")((relative: string) =>
+    fs.readFileString(path.join(NodeOS.homedir(), relative)).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () => Effect.succeed(null),
+      ),
+      Effect.mapError(devboxError("provision")),
+    ),
+  );
+  const installPersonalization = Effect.fn("DevboxService.installPersonalization")(function* (
+    name: string,
   ) {
-    const needed = (["claude", "codex"] as const).filter(
-      (provider) => record.credentials[provider] !== "installed",
+    const skill = yield* readPersonalFile(".agents/skills/council/SKILL.md");
+    if (skill === null || skill.trim().length === 0) return;
+    const instructions = yield* Effect.all({
+      codexInstructions: readPersonalFile(".codex/AGENTS.md"),
+      claudeInstructions: readPersonalFile(".claude/CLAUDE.md"),
+    });
+    const body = yield* encodeJson({ skill, ...instructions }).pipe(
+      Effect.mapError(devboxError("provision")),
     );
-    if (needed.length === 0) return record;
-    const claim = yield* pool
-      .claim(record.name, needed)
-      .pipe(Effect.mapError(devboxError("provision")));
-    const payload = {
-      claude: Option.getOrNull(claim.claude),
-      codex: Option.getOrNull(claim.codex),
-    };
+    yield* ssh(name, `python3 -c ${shellQuote(INSTALL_PERSONALIZATION_SCRIPT)}`, body, "1 minute");
+  });
+
+  // Writes this machine's access tokens to a box. Its refresh tokens never leave this machine.
+  const pushLogins = Effect.fn("DevboxService.pushLogins")(function* (record: DevboxRecord) {
+    const payload = yield* logins.payload;
+    let result: {
+      readonly claude?: "installed" | "unbound" | "failed";
+      readonly codex?: "installed" | "unbound" | "failed";
+    } = {};
     if (payload.claude !== null || payload.codex !== null) {
       const body = yield* encodeJson(payload).pipe(Effect.mapError(devboxError("provision")));
-      yield* ssh(record.name, `python3 -c ${shellQuote(INSTALL_CREDENTIALS_SCRIPT)}`, body);
-      yield* claim.commit.pipe(Effect.mapError(devboxError("provision")));
+      const stdout = yield* ssh(
+        record.name,
+        `python3 -c ${shellQuote(INSTALL_CREDENTIALS_SCRIPT)}`,
+        body,
+        "1 minute",
+      );
+      result = yield* decodeInstallResult(stdout.trim().split("\n").at(-1) ?? "").pipe(
+        Effect.mapError(devboxError("provision")),
+      );
+      // A box that skipped a token (no Formal yet) gets it again on the next sync.
+      const complete = (["claude", "codex"] as const).every(
+        (provider) => result[provider] !== "unbound" && result[provider] !== "failed",
+      );
+      // Only a skipped sealed token says the box lacks Formal; one that installed proves it has it.
+      if (result.claude === "unbound" || result.codex === "unbound") unboundBoxes.add(record.name);
+      else if (
+        (result.claude === "installed" &&
+          payload.claude?.oauth.accessToken.startsWith("formalsealed:")) ||
+        (result.codex === "installed" &&
+          payload.codex?.tokens.access_token.startsWith("formalsealed:"))
+      )
+        unboundBoxes.delete(record.name);
+      // A box that skipped or failed a token gets it again on the next sync.
+      if (complete) pushed.set(record.name, loginsKey(payload));
+      else pushed.delete(record.name);
     }
-    const state = (
-      current: DevboxRecord,
-      provider: "claude" | "codex",
-      claimed: Option.Option<unknown>,
-    ): DevboxCredentialState =>
-      current.credentials[provider] === "installed" || Option.isSome(claimed)
-        ? "installed"
-        : "pool-empty";
-    return yield* updateRecord(record.name, (current) => ({
-      ...current,
-      credentials: {
-        claude: state(current, "claude", claim.claude),
-        codex: state(current, "codex", claim.codex),
-      },
-    }));
+    // Signed in but not sent means the token expired and renewal has not reached a box yet.
+    const state = Effect.fn("DevboxService.credentialState")(function* (
+      provider: DevboxLoginProvider,
+    ): Effect.fn.Return<DevboxCredentialState> {
+      const installed = result[provider];
+      if (installed === "installed" || installed === "unbound") return installed;
+      if (installed === "failed") return "not-installed";
+      const info = yield* logins.info(provider);
+      if (!info.signedIn || refused.has(provider)) return "no-login";
+      // Claude renews only through Formal; Codex needs it once sealed.
+      const needsFormal = provider === "claude" || info.sealed;
+      return needsFormal && unboundBoxes.has(record.name) ? "unbound" : "not-installed";
+    });
+    const credentials = { claude: yield* state("claude"), codex: yield* state("codex") };
+    const current = yield* getRecord(record.name);
+    if (
+      current.credentials.claude === credentials.claude &&
+      current.credentials.codex === credentials.codex
+    )
+      return current;
+    return yield* updateRecord(record.name, (latest) => ({ ...latest, credentials }));
   });
+
+  // Refreshes due sign-ins on this box: with Formal on it, Asana's connector seals the answer.
+  // Its output carries tokens, so failures report fixed text, never what ssh or the box printed.
+  const relayThrough = (name: string) => (request: DevboxLogins.DevboxRefreshRequest) =>
+    Effect.gen(function* () {
+      const body = yield* encodeJson(request);
+      // Kept as it arrives and read whatever ssh does next (error exit, timeout): once the
+      // provider answered, it holds the only live refresh token.
+      let streamed = "";
+      const stdout = yield* runner
+        .run({
+          command: "ssh",
+          args: [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=30",
+            `coder.${name}`,
+            `python3 -c ${shellQuote(REFRESH_LOGIN_SCRIPT)}`,
+          ],
+          stdin: body,
+          timeout: "2 minutes",
+          env: { BROWSER: browserFilter },
+          onStdoutChunk: (chunk) => {
+            streamed += new TextDecoder().decode(chunk);
+          },
+        })
+        .pipe(
+          Effect.map((result) => result.stdout),
+          Effect.orElseSucceed(() => streamed),
+        );
+      return yield* decodeRelayOutput(stdout.trim().split("\n").at(-1) ?? "");
+    }).pipe(
+      Effect.mapError(
+        () =>
+          new DevboxError({
+            reason: "provision",
+            message: `Could not reach ${name} to renew the ${request.provider} sign-in.`,
+          }),
+      ),
+      Effect.tap((output) =>
+        Effect.sync(() => {
+          if (output.error === "unbound") {
+            unboundBoxes.add(name);
+            // Its cached push predates losing Formal; the next sync checks the box again.
+            pushed.delete(name);
+          } else if (request.requireFormal) unboundBoxes.delete(name);
+        }),
+      ),
+      Effect.flatMap((output) => {
+        if (output.error === undefined) return Effect.succeed(output.response);
+        if (output.error === "rejected")
+          return (
+            // An unsealed token went to the provider as is, so its refusal is final; a sealed one
+            // may only have met a box whose proxy did not unseal it.
+            (
+              request.refreshToken.startsWith("formalsealed:")
+                ? Effect.void
+                : logins.reject(request.provider, request.refreshToken)
+            ).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new DevboxError({
+                    reason: "invalid",
+                    message: `The ${request.provider} sign-in was rejected${output.status === undefined ? "" : ` (HTTP ${output.status})`}. Sign in again.`,
+                  }),
+                ),
+              ),
+            )
+          );
+        return Effect.fail(
+          new DevboxError({
+            reason: "provision",
+            message:
+              output.error === "unbound"
+                ? `${name} has no Formal sign-in, so it cannot renew the ${request.provider} sign-in.`
+                : `${name} could not reach the ${request.provider} sign-in service.`,
+          }),
+        );
+      }),
+    );
+  // What a box was last given, including outcomes that change its shown state.
+  const loginsKey = (payload: DevboxLogins.DevboxLoginPayload) =>
+    `${tokensKey(payload)}|${[...refused].toSorted().join(",")}`;
+  const setLoginError = (provider: DevboxLoginProvider, message: string | null) =>
+    Ref.update(loginErrors, (current) => ({ ...current, [provider]: message }));
+
+  /**
+   * Renews each due sign-in through the first of `boxes` that manages it. `report` shows a
+   * failure in Settings; one box failing during its own connect is not news there.
+   */
+  const refreshLogins = Effect.fn("DevboxService.refreshLogins")(function* (
+    boxes: ReadonlyArray<string>,
+    report: boolean,
+    // Box lock first, provider lock inside: the order `connect` takes them in.
+    onBox: <A, E>(
+      name: string,
+      effect: Effect.Effect<A, E>,
+    ) => Effect.Effect<A, E | DevboxError> = (_name, effect) => effect,
+  ) {
+    let renewed = false;
+    // With no box running nothing can renew; the next box to connect does it.
+    if (boxes.length === 0) return renewed;
+    for (const provider of DevboxLogins.DEVBOX_LOGIN_PROVIDERS) {
+      if (Option.isNone(yield* logins.due(provider))) continue;
+      // A sign-in, sign-out or another renewal meanwhile makes this pass's failure stale.
+      const generation = yield* logins.generation(provider);
+      let lastError: string | null = `No running devbox could renew the ${provider} sign-in.`;
+      let refusal: string | null = null;
+      let outcome: "renewed" | "settled" | "failed" = "failed";
+      for (const name of boxes) {
+        const attempt = yield* onBox(name, logins.refresh(provider, relayThrough(name))).pipe(
+          Effect.result,
+        );
+        if (attempt._tag === "Success") {
+          // `false`: another caller renewed it first and reports the outcome itself.
+          outcome = attempt.success ? "renewed" : "settled";
+          renewed ||= attempt.success;
+          break;
+        }
+        lastError = attempt.failure.message;
+        // The provider answered but the answer could not be saved: another box would only send
+        // the token it already rotated.
+        if (attempt.failure._tag !== "DevboxError") break;
+        if (attempt.failure.reason !== "invalid") continue;
+        refusal = attempt.failure.message;
+        // `relayThrough` marked an unsealed token dead, so it is no longer due. A sealed one may
+        // only have met a proxy that did not unseal it; the next box tries.
+        if (Option.isNone(yield* logins.due(provider))) break;
+      }
+      if (outcome === "settled") continue;
+      if (outcome !== "renewed" && (yield* logins.generation(provider)) !== generation) continue;
+      if (outcome === "renewed") {
+        refused.delete(provider);
+        yield* setLoginError(provider, null);
+        continue;
+      }
+      if (refusal !== null) {
+        // A refused sign-in needs the user wherever it was found.
+        refused.add(provider);
+        yield* setLoginError(provider, refusal);
+      } else if (report && !refused.has(provider)) {
+        // A known refusal stays shown until a renewal or the user clears it.
+        yield* setLoginError(provider, lastError);
+      }
+      yield* Effect.logWarning("devbox sign-in renewal failed", {
+        provider,
+        lastError: refusal ?? lastError,
+      });
+    }
+    return renewed;
+  });
+
+  /** Renews due sign-ins through any running box, then gives every running box the new tokens. */
+  const syncLogins = Effect.gen(function* () {
+    const all = yield* workspaces;
+    const running = [...(yield* Ref.get(records)).values()].filter(
+      (record) => all.get(record.name)?.latest_build.status === "running",
+    );
+    // A box being stopped or deleted holds its lock, so a renewal never relays through one
+    // going away; a box being set up renews through its own `connect`.
+    const busy = new Set(yield* locks.activeKeys);
+    const relays: Array<string> = [];
+    for (const record of running)
+      if (!busy.has(record.name) && !(yield* FiberMap.has(creations, record.name)))
+        relays.push(record.name);
+    yield* refreshLogins(relays, true, (name, effect) =>
+      locks.withLock(
+        name,
+        Effect.gen(function* () {
+          // It may have started stopping or deleting while this pass waited for the lock.
+          const state = (yield* Ref.get(transient)).get(name)?.state;
+          if (state === "stopping" || state === "deleting" || state === "creating")
+            return yield* new DevboxError({
+              reason: "busy",
+              message: `${name} is busy and cannot renew sign-ins now.`,
+            });
+          return yield* effect;
+        }),
+      ),
+    );
+    const key = loginsKey(yield* logins.payload);
+    const held = new Set(yield* locks.activeKeys);
+    for (const record of running) {
+      // A box being set up, stopped or deleted gets its tokens later; waiting on its lock would
+      // stall the rest.
+      if (
+        pushed.get(record.name) === key ||
+        held.has(record.name) ||
+        (yield* FiberMap.has(creations, record.name))
+      )
+        continue;
+      yield* locks
+        .withLock(record.name, pushLogins(record))
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("devbox sign-ins could not be pushed", { name: record.name, cause }),
+          ),
+        );
+    }
+  }).pipe(
+    Effect.catchCause((cause) => Effect.logWarning("devbox sign-in sync failed", { cause })),
+    Effect.withSpan("DevboxService.syncLogins"),
+  );
 
   // Every box uses this machine's Cursor sign-in: Cursor keys are per account, not per machine.
   const cursorCredentials = yield* ProviderCredentialStore.make("cursor", "cursor");
@@ -734,8 +1012,21 @@ export const make = Effect.gen(function* () {
       // The startup script (codez refresh, full redeploy) can run for over 30 minutes; agents
       // only need ssh and the checkout, so connect as soon as the box's agent answers.
       yield* coder(["ssh", "--wait=no", stored.name, "--", "true"], "10 minutes");
-      // A box whose creation stopped early, or that met an empty pool, still needs its logins.
-      const record = yield* installCredentials(stored);
+      yield* installPersonalization(stored.name);
+      // This box can renew a due sign-in itself, so a waking box gets a fresh token at once.
+      // A renewal here changes every box's token; the others get it in the background.
+      // A refusal here may only be this box's proxy; the sync gives the other boxes a try.
+      if ((yield* refreshLogins([stored.name], false)) || refused.size > 0)
+        yield* FiberSet.run(background, syncLogins);
+      // Sign-ins arriving late must not keep the box from connecting; the sync retries them.
+      const record = yield* pushLogins(stored).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("devbox sign-ins could not be pushed", {
+            name: stored.name,
+            cause,
+          }).pipe(Effect.andThen(getRecord(stored.name))),
+        ),
+      );
       // A box set up by this script starts T3 itself at boot: reconnecting is enough.
       if (record.provisioned === PROVISION_REVISION && record.environmentId !== null) {
         const reached = yield* startTunnel(record).pipe(
@@ -872,14 +1163,8 @@ export const make = Effect.gen(function* () {
       task: input.task ?? null,
       createdAt: DateTime.formatIso(yield* DateTime.now),
       credentials: {
-        claude:
-          (yield* pool.freeCount("claude").pipe(Effect.orElseSucceed(() => 0))) > 0
-            ? "not-installed"
-            : "pool-empty",
-        codex:
-          (yield* pool.freeCount("codex").pipe(Effect.orElseSucceed(() => 0))) > 0
-            ? "not-installed"
-            : "pool-empty",
+        claude: (yield* logins.info("claude")).signedIn ? "not-installed" : "no-login",
+        codex: (yield* logins.info("codex")).signedIn ? "not-installed" : "no-login",
       },
       ...(spare ? { spare: true } : {}),
     };
@@ -915,7 +1200,14 @@ export const make = Effect.gen(function* () {
                 summary.state !== "running" ||
                 summary.environmentId === null ||
                 summary.credentials.claude === "installed" ||
-                summary.credentials.codex === "installed")
+                summary.credentials.codex === "installed" ||
+                // Only the user can bind Formal on the box; with nothing else on its way,
+                // waiting longer will not help.
+                ((summary.credentials.claude === "unbound" ||
+                  summary.credentials.codex === "unbound") &&
+                  [summary.credentials.claude, summary.credentials.codex].every(
+                    (state) => state === "unbound" || state === "no-login",
+                  )))
             )
               return summary;
             yield* PubSub.take(subscription);
@@ -1019,7 +1311,8 @@ export const make = Effect.gen(function* () {
             );
             yield* coder(["delete", name, "--yes"], "15 minutes");
           }
-          yield* pool.release(name);
+          pushed.delete(name);
+          unboundBoxes.delete(name);
           yield* Ref.update(records, (current) => {
             const next = new Map(current);
             next.delete(name);
@@ -1105,78 +1398,69 @@ export const make = Effect.gen(function* () {
     return { ...pairing, name };
   }).pipe(Effect.withSpan("DevboxService.claim"));
 
-  // Hands pooled sign-ins to running boxes without them. Sign-ins are minted only
-  // when the user queues them (`startLogin`), so no browser window opens on its own.
-  const distributeLogins = Effect.gen(function* () {
-    const all = yield* workspaces;
-    // Boxes in use first: someone is waiting on them; spares get the next sign-in.
-    const ordered = [...(yield* Ref.get(records)).values()].toSorted(
-      (a, b) => Number(a.spare === true) - Number(b.spare === true),
-    );
-    for (const record of ordered) {
-      const missing =
-        record.credentials.claude !== "installed" || record.credentials.codex !== "installed";
-      if (!missing || all.get(record.name)?.latest_build.status !== "running") continue;
-      yield* locks
-        .withLock(record.name, installCredentials(record))
-        .pipe(Effect.catchCause((cause) => Effect.logWarning("devbox logins failed", { cause })));
-    }
-  }).pipe(
-    Effect.catchCause((cause) =>
-      Effect.logWarning("devbox logins could not be handed out", { cause }),
-    ),
-  );
-  const poolOf = Effect.fn("DevboxService.poolOf")(function* (provider: DevboxLoginProvider) {
-    const pending = yield* pool.pendingLogins;
-    const queue = (yield* Ref.get(loginQueues))[provider];
+  const loginOf = Effect.fn("DevboxService.loginOf")(function* (provider: DevboxLoginProvider) {
+    const info = yield* logins.info(provider);
     return {
       provider,
-      free: yield* pool.freeCount(provider).pipe(Effect.orElseSucceed(() => 0)),
-      inUse: yield* pool.assignedCount(provider),
-      queued: queue.queued,
-      pendingUrl: pending.find((login) => login.provider === provider)?.url ?? null,
-      lastError: queue.lastError,
-    } satisfies DevboxLoginPool;
+      ...info,
+      signingIn: yield* FiberMap.has(loginWorkers, provider),
+      pendingUrl: yield* logins.pendingUrl(provider),
+      lastError: (yield* Ref.get(loginErrors))[provider],
+    } satisfies DevboxLogin;
   });
-  const pools: DevboxService["Service"]["pools"] = Effect.forEach(
-    ["claude", "codex"] as const,
-    (provider) => poolOf(provider),
+  const loginList: DevboxService["Service"]["logins"] = Effect.forEach(
+    DevboxLogins.DEVBOX_LOGIN_PROVIDERS,
+    (provider) => loginOf(provider),
   );
-  const setQueue = (provider: DevboxLoginProvider, change: (queue: LoginQueue) => LoginQueue) =>
-    Ref.update(loginQueues, (current) => ({ ...current, [provider]: change(current[provider]) }));
-  // One sign-in at a time per provider: each waits for its own browser approval.
-  const loginWorker = Effect.fn("DevboxService.loginWorker")(function* (
-    provider: DevboxLoginProvider,
-  ) {
-    while ((yield* Ref.get(loginQueues))[provider].queued > 0) {
-      const minted = yield* pool.mint(provider).pipe(Effect.result);
-      if (minted._tag === "Failure") {
-        yield* setQueue(provider, () => ({ queued: 0, lastError: minted.failure.message }));
-        return;
-      }
-      yield* setQueue(provider, (queue) => ({ ...queue, queued: Math.max(0, queue.queued - 1) }));
-      yield* FiberSet.run(background, distributeLogins);
-    }
-  });
   const startLogin: DevboxService["Service"]["startLogin"] = Effect.fn("DevboxService.startLogin")(
-    function* (provider, count) {
-      yield* setQueue(provider, (queue) => ({ queued: queue.queued + count, lastError: null }));
-      yield* FiberMap.run(loginWorkers, provider, loginWorker(provider), { onlyIfMissing: true });
-      return yield* poolOf(provider);
+    function* (provider) {
+      // A refusal stays shown until the new sign-in succeeds, even if this one is cancelled.
+      if (!refused.has(provider)) yield* setLoginError(provider, null);
+      yield* FiberMap.run(
+        loginWorkers,
+        provider,
+        logins.signIn(provider).pipe(
+          // A new sign-in replaces any refusal of the old one.
+          Effect.tap(() =>
+            Effect.sync(() => refused.delete(provider)).pipe(
+              Effect.andThen(setLoginError(provider, null)),
+            ),
+          ),
+          // Apart from the sign-in, so Cancel can never interrupt a renewal.
+          Effect.andThen(FiberSet.run(background, syncLogins)),
+          Effect.catch((error) => setLoginError(provider, error.message)),
+        ),
+        { onlyIfMissing: true },
+      );
+      return yield* loginOf(provider);
     },
   );
-  const cancelLogins: DevboxService["Service"]["cancelLogins"] = Effect.fn(
-    "DevboxService.cancelLogins",
+  const cancelLogin: DevboxService["Service"]["cancelLogin"] = Effect.fn(
+    "DevboxService.cancelLogin",
   )(function* (provider) {
-    yield* setQueue(provider, () => ({ queued: 0, lastError: null }));
     yield* FiberMap.remove(loginWorkers, provider);
-    return yield* poolOf(provider);
+    return yield* loginOf(provider);
   });
+  const signOut: DevboxService["Service"]["signOut"] = Effect.fn("DevboxService.signOut")(
+    function* (provider) {
+      yield* FiberMap.remove(loginWorkers, provider);
+      const signedOut = yield* logins.signOut(provider).pipe(Effect.result);
+      refused.delete(provider);
+      yield* setLoginError(
+        provider,
+        signedOut._tag === "Failure" ? signedOut.failure.message : null,
+      );
+      // Boxes keep their token until it expires, but show the sign-out at once.
+      pushed.clear();
+      yield* FiberSet.run(background, syncLogins);
+      return yield* loginOf(provider);
+    },
+  );
 
   const submitLoginCode: DevboxService["Service"]["submitLoginCode"] = Effect.fn(
     "DevboxService.submitLoginCode",
   )(function* (provider, code) {
-    yield* pool.submitCode(provider, code).pipe(Effect.mapError(devboxError("invalid")));
+    yield* logins.submitCode(provider, code).pipe(Effect.mapError(devboxError("invalid")));
   });
 
   // ── usage ────────────────────────────────────────────────────────────────
@@ -1417,7 +1701,8 @@ export const make = Effect.gen(function* () {
     if (record.environmentId !== null)
       yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
     yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
-    yield* pool.release(name);
+    pushed.delete(name);
+    unboundBoxes.delete(name);
     const now = yield* Clock.currentTimeMillis;
     yield* Ref.update(history, (current) => [
       ...current.filter((box) => box.name !== name),
@@ -1484,7 +1769,10 @@ export const make = Effect.gen(function* () {
     }
   }).pipe(Effect.catchCause((cause) => Effect.logWarning("devbox heal failed", { cause })));
   yield* forkParked(Effect.sleep(Duration.minutes(2)).pipe(Effect.andThen(heal), Effect.forever));
-  yield* forkParked(distributeLogins.pipe(Effect.repeat(Schedule.spaced(Duration.minutes(5)))));
+  // An idle tick is one `coder list`; a box that just got Formal gets its token within minutes.
+  yield* forkParked(
+    Effect.sleep(LOGIN_SYNC_INTERVAL).pipe(Effect.andThen(syncLogins), Effect.forever),
+  );
   yield* forkParked(
     reconnect.pipe(
       Effect.catchCause((cause) => Effect.logWarning("devbox reconnect failed", { cause })),
@@ -1495,9 +1783,10 @@ export const make = Effect.gen(function* () {
 
   return DevboxService.of({
     list,
-    pools,
+    logins: loginList,
     startLogin,
-    cancelLogins,
+    cancelLogin,
+    signOut,
     submitLoginCode,
     create,
     awaitReady,
@@ -1512,11 +1801,20 @@ export const make = Effect.gen(function* () {
   });
 });
 
+// The `pool-empty` of older records means the same as `no-login`.
+function shownCredential(state: DevboxCredentialState | "pool-empty"): DevboxCredentialState {
+  return state === "pool-empty" ? "no-login" : state;
+}
+
+function tokensKey(payload: DevboxLogins.DevboxLoginPayload): string {
+  return `${payload.claude?.oauth.accessToken ?? ""}|${payload.codex?.tokens.access_token ?? ""}`;
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export const layer = Layer.effect(DevboxService, make).pipe(
-  Layer.provide(DevboxCredentialPool.layer),
+  Layer.provide(DevboxLogins.layer),
   Layer.provide(FetchHttpClient.layer),
 );

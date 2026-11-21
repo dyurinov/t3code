@@ -35,11 +35,10 @@ import {
   DevboxError,
   DevboxListResult,
   DevboxNameInput,
-  DevboxStartLoginInput,
-  DevboxCancelLoginsInput,
+  DevboxLoginInput,
   DevboxUsageInput,
   DevboxUsageResult,
-  DevboxLoginPool,
+  DevboxLogin,
   DevboxSubmitLoginCodeInput,
   DevboxSummary,
 } from "./devbox.ts";
@@ -574,7 +573,8 @@ export const WS_METHODS = {
   devboxesClaim: "devboxes.claim",
   devboxesSubmitLoginCode: "devboxes.submitLoginCode",
   devboxesStartLogin: "devboxes.startLogin",
-  devboxesCancelLogins: "devboxes.cancelLogins",
+  devboxesCancelLogin: "devboxes.cancelLogin",
+  devboxesSignOut: "devboxes.signOut",
   devboxesUsage: "devboxes.usage",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
@@ -966,13 +966,18 @@ const WsDevboxesClaimRpc = Rpc.make(WS_METHODS.devboxesClaim, {
   error: devboxErrors,
 });
 const WsDevboxesStartLoginRpc = Rpc.make(WS_METHODS.devboxesStartLogin, {
-  payload: DevboxStartLoginInput,
-  success: DevboxLoginPool,
+  payload: DevboxLoginInput,
+  success: DevboxLogin,
   error: devboxErrors,
 });
-const WsDevboxesCancelLoginsRpc = Rpc.make(WS_METHODS.devboxesCancelLogins, {
-  payload: DevboxCancelLoginsInput,
-  success: DevboxLoginPool,
+const WsDevboxesCancelLoginRpc = Rpc.make(WS_METHODS.devboxesCancelLogin, {
+  payload: DevboxLoginInput,
+  success: DevboxLogin,
+  error: devboxErrors,
+});
+const WsDevboxesSignOutRpc = Rpc.make(WS_METHODS.devboxesSignOut, {
+  payload: DevboxLoginInput,
+  success: DevboxLogin,
   error: devboxErrors,
 });
 const WsDevboxesUsageRpc = Rpc.make(WS_METHODS.devboxesUsage, {
@@ -2395,7 +2400,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsDevboxesClaimRpc,
   WsDevboxesSubmitLoginCodeRpc,
   WsDevboxesStartLoginRpc,
-  WsDevboxesCancelLoginsRpc,
+  WsDevboxesCancelLoginRpc,
+  WsDevboxesSignOutRpc,
   WsDevboxesUsageRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerCheckSecretSourceRpc,

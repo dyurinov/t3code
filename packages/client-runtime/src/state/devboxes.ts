@@ -65,9 +65,15 @@ export function createDevboxEnvironmentAtoms<R, E>(
       onSuccess: ({ environmentId }, registry) =>
         Effect.sync(() => registry.refresh(list({ environmentId, input: {} }))),
     }),
-    cancelLogins: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:devboxes:cancel-logins",
-      tag: WS_METHODS.devboxesCancelLogins,
+    cancelLogin: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:devboxes:cancel-login",
+      tag: WS_METHODS.devboxesCancelLogin,
+      onSuccess: ({ environmentId }, registry) =>
+        Effect.sync(() => registry.refresh(list({ environmentId, input: {} }))),
+    }),
+    signOut: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:devboxes:sign-out",
+      tag: WS_METHODS.devboxesSignOut,
       onSuccess: ({ environmentId }, registry) =>
         Effect.sync(() => registry.refresh(list({ environmentId, input: {} }))),
     }),

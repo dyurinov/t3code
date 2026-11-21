@@ -2704,8 +2704,8 @@ export const layerWsRpc = (
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
         [WS_METHODS.devboxesList]: (_input) =>
-          Effect.all([devboxes.list, devboxes.pools, devboxes.deleted]).pipe(
-            Effect.map(([list, pools, deleted]) => ({ devboxes: list, pools, deleted })),
+          Effect.all([devboxes.list, devboxes.logins, devboxes.deleted]).pipe(
+            Effect.map(([list, logins, deleted]) => ({ devboxes: list, logins, deleted })),
           ),
         [WS_METHODS.devboxesCreate]: (input) => devboxes.create(input),
         [WS_METHODS.devboxesWake]: ({ name }) => devboxes.wake(name),
@@ -2714,9 +2714,9 @@ export const layerWsRpc = (
           devboxes.remove(name, { force: force ?? false }).pipe(Effect.as({ name, deleted: true })),
         [WS_METHODS.devboxesPairClient]: ({ name }) => devboxes.pairClient(name),
         [WS_METHODS.devboxesClaim]: (_input) => devboxes.claim,
-        [WS_METHODS.devboxesStartLogin]: ({ provider, count }) =>
-          devboxes.startLogin(provider, count ?? 1),
-        [WS_METHODS.devboxesCancelLogins]: ({ provider }) => devboxes.cancelLogins(provider),
+        [WS_METHODS.devboxesStartLogin]: ({ provider }) => devboxes.startLogin(provider),
+        [WS_METHODS.devboxesCancelLogin]: ({ provider }) => devboxes.cancelLogin(provider),
+        [WS_METHODS.devboxesSignOut]: ({ provider }) => devboxes.signOut(provider),
         [WS_METHODS.devboxesUsage]: (input) => devboxes.usage(input),
         [WS_METHODS.devboxesSubmitLoginCode]: ({ provider, code }) =>
           devboxes.submitLoginCode(provider, code),

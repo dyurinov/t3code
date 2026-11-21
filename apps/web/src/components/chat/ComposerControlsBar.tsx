@@ -68,7 +68,7 @@ export function ComposerControlsBar(props: {
   showProviderUnavailable: boolean;
   providerSetupInstanceId: ProviderInstanceId | undefined;
   onOpenProviderSetup: ChatComposerProps["onOpenProviderSetup"];
-  /** On a devbox, providers come from the host's sign-in pool rather than the box's settings. */
+  /** On a devbox, providers come from the host's sign-ins rather than the box's settings. */
   onOpenDevboxSignIns: (() => void) | undefined;
   providerCatalogPending: boolean;
   isSendBusy: boolean;
@@ -259,7 +259,7 @@ export function ComposerControlsBar(props: {
       className="shrink-0"
     >
       <CircleAlertIcon className="size-4" />
-      <T>Add devbox sign-ins</T>
+      <T>Devbox sign-ins</T>
     </ComposerControl>
   ) : showProviderUnavailable ? (
     <ComposerControl

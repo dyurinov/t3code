@@ -18,8 +18,203 @@ import {
   slugifyDevboxName,
   uniqueDevboxName,
   INSTALL_T3_SCRIPT,
+  INSTALL_PERSONALIZATION_SCRIPT,
+  INSTALL_CREDENTIALS_SCRIPT,
+  REFRESH_LOGIN_SCRIPT,
   SIBLING_SCRIPT,
 } from "./devboxScripts.ts";
+
+describe("devbox sign-in install", () => {
+  it("writes access tokens only, keeps MCP sign-ins, and skips sealed tokens a box without Formal cannot use", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-logins-"));
+    using _cleanup = {
+      [Symbol.dispose]: () => NodeFS.rmSync(home, { recursive: true, force: true }),
+    };
+    const bin = NodePath.join(home, "bin");
+    NodeFS.mkdirSync(bin);
+    NodeFS.writeFileSync(
+      NodePath.join(bin, "formal"),
+      "#!/bin/sh\necho 'You are not logged in'\n",
+      {
+        mode: 0o755,
+      },
+    );
+    const credentials = NodePath.join(home, ".claude", ".credentials.json");
+    NodeFS.mkdirSync(NodePath.dirname(credentials));
+    NodeFS.writeFileSync(
+      credentials,
+      JSON.stringify({
+        claudeAiOauth: { accessToken: "old", refreshToken: "box-own-refresh" },
+        mcpOAuth: { "axiom|1": { accessToken: "mcp" } },
+      }),
+    );
+    NodeFS.writeFileSync(NodePath.join(home, ".claude.json"), JSON.stringify({ theme: "dark" }));
+    const payload = {
+      claude: {
+        oauth: { accessToken: "sk-ant-oat01-new", expiresAt: 1, scopes: ["user:inference"] },
+        oauthAccount: { emailAddress: "me@example.com" },
+      },
+      codex: {
+        auth_mode: "chatgpt",
+        tokens: { id_token: "id", access_token: "formalsealed:v2:codex", refresh_token: "" },
+      },
+    };
+    const stdout = NodeChildProcess.execFileSync("python3", ["-c", INSTALL_CREDENTIALS_SCRIPT], {
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` },
+    });
+    expect(JSON.parse(stdout)).toEqual({ claude: "installed", codex: "unbound" });
+    expect(JSON.parse(NodeFS.readFileSync(credentials, "utf8"))).toEqual({
+      claudeAiOauth: payload.claude.oauth,
+      mcpOAuth: { "axiom|1": { accessToken: "mcp" } },
+    });
+    expect(NodeFS.statSync(credentials).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(NodeFS.readFileSync(NodePath.join(home, ".claude.json"), "utf8"))).toEqual({
+      theme: "dark",
+      oauthAccount: payload.claude.oauthAccount,
+      hasCompletedOnboarding: true,
+    });
+    expect(NodeFS.existsSync(NodePath.join(home, ".codex", "auth.json"))).toBe(false);
+  });
+});
+
+describe("devbox sign-in install with broken files", () => {
+  it.each(["{ not json", "null", "[]"])(
+    "still installs Codex, and leaves Claude untouched, when Claude's config is %s",
+    (config) => {
+      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-logins-broken-"));
+      using _cleanup = {
+        [Symbol.dispose]: () => NodeFS.rmSync(home, { recursive: true, force: true }),
+      };
+      NodeFS.writeFileSync(NodePath.join(home, ".claude.json"), config);
+      const stdout = NodeChildProcess.execFileSync("python3", ["-c", INSTALL_CREDENTIALS_SCRIPT], {
+        input: JSON.stringify({
+          claude: { oauth: { accessToken: "sk-ant-oat01-new" }, oauthAccount: {} },
+          codex: { auth_mode: "chatgpt", tokens: { access_token: "access", refresh_token: "" } },
+        }),
+        encoding: "utf8",
+        env: { ...process.env, HOME: home },
+      });
+      expect(JSON.parse(stdout)).toEqual({ claude: "failed", codex: "installed" });
+      expect(NodeFS.existsSync(NodePath.join(home, ".codex", "auth.json"))).toBe(true);
+      expect(NodeFS.existsSync(NodePath.join(home, ".claude", ".credentials.json"))).toBe(false);
+    },
+  );
+});
+
+describe("devbox sign-in renewal", () => {
+  it("tells a dead refresh token from an outage, in each provider's error shape", () => {
+    const cases = [
+      { status: 400, body: { error: "invalid_grant" }, expected: "rejected" },
+      {
+        status: 401,
+        body: { error: { code: "invalid_refresh_token", type: "invalid_request_error" } },
+        expected: "rejected",
+      },
+      { status: 401, body: { error: { code: "refresh_token_reused" } }, expected: "rejected" },
+      { status: 400, body: { error: "invalid_scope" }, expected: "unreachable" },
+      { status: 403, body: "<html>blocked by proxy</html>", expected: "unreachable" },
+    ];
+    for (const { status, body, expected } of cases) {
+      const text = typeof body === "string" ? body : JSON.stringify(body);
+      // Stands in for the provider: every request is answered with this refusal.
+      const harness = [
+        "import io, sys, urllib.error, urllib.request",
+        "def refuse(request, timeout=None):",
+        `    raise urllib.error.HTTPError(request.full_url, ${status}, "refused", {}, io.BytesIO(${JSON.stringify(text)}.encode()))`,
+        "urllib.request.urlopen = refuse",
+        "exec(sys.argv[1])",
+      ].join("\n");
+      const stdout = NodeChildProcess.execFileSync(
+        "python3",
+        ["-c", harness, REFRESH_LOGIN_SCRIPT],
+        {
+          input: JSON.stringify({
+            provider: "codex",
+            refreshToken: "rt.1.secret",
+            scopes: [],
+            requireFormal: false,
+          }),
+          encoding: "utf8",
+        },
+      );
+      expect(JSON.parse(stdout)).toEqual({ error: expected, status });
+    }
+  });
+
+  it("refuses to send a token that needs Formal from a box without it", () => {
+    const bin = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-renew-"));
+    using _cleanup = {
+      [Symbol.dispose]: () => NodeFS.rmSync(bin, { recursive: true, force: true }),
+    };
+    NodeFS.writeFileSync(
+      NodePath.join(bin, "formal"),
+      "#!/bin/sh\necho 'You are not logged in'\n",
+      {
+        mode: 0o755,
+      },
+    );
+    const stdout = NodeChildProcess.execFileSync("python3", ["-c", REFRESH_LOGIN_SCRIPT], {
+      input: JSON.stringify({
+        provider: "claude",
+        refreshToken: "sk-ant-ort01-secret",
+        scopes: [],
+        requireFormal: true,
+      }),
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+    expect(JSON.parse(stdout)).toEqual({ error: "unbound" });
+  });
+});
+
+describe("devbox personal instructions", () => {
+  it("installs Council for both providers and updates only its managed instruction block", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-personalization-"));
+    using _cleanup = {
+      [Symbol.dispose]: () => NodeFS.rmSync(home, { recursive: true, force: true }),
+    };
+    const instructions = NodePath.join(home, ".codex", "AGENTS.md");
+    NodeFS.mkdirSync(NodePath.dirname(instructions), { recursive: true });
+    NodeFS.writeFileSync(instructions, "Keep my existing instructions.\n");
+    NodeFS.writeFileSync(NodePath.join(home, ".codex", "auth.json"), "untouched credentials");
+    const payload = {
+      skill: "---\nname: council\ndescription: Review with the council.\n---\nCouncil workflow\n",
+      codexInstructions: "## Council\nUse reviewer A and reviewer B only.\n",
+      claudeInstructions: "## Council\nUse reviewer A and reviewer B only.\n",
+    };
+    const run = () =>
+      NodeChildProcess.execFileSync("python3", ["-c", INSTALL_PERSONALIZATION_SCRIPT], {
+        input: JSON.stringify(payload),
+        encoding: "utf8",
+        env: { ...process.env, HOME: home },
+      });
+    run();
+    for (const provider of [".agents", ".codex", ".claude"]) {
+      expect(
+        NodeFS.readFileSync(NodePath.join(home, provider, "skills/council/SKILL.md"), "utf8"),
+      ).toBe(payload.skill);
+    }
+    const first = NodeFS.readFileSync(instructions, "utf8");
+    expect(first).toContain("Keep my existing instructions.");
+    expect(first).toContain(payload.codexInstructions.trim());
+    run();
+    expect(NodeFS.readFileSync(instructions, "utf8")).toBe(first);
+    payload.codexInstructions = "## Council\nUpdated reviewer preference.\n";
+    run();
+    const updated = NodeFS.readFileSync(instructions, "utf8");
+    expect(updated).toContain("Keep my existing instructions.");
+    expect(updated).toContain(payload.codexInstructions.trim());
+    expect(updated).not.toContain("Use reviewer A and reviewer B only.");
+    expect(NodeFS.readFileSync(NodePath.join(home, ".codex/auth.json"), "utf8")).toBe(
+      "untouched credentials",
+    );
+    expect(NodeFS.readFileSync(NodePath.join(home, ".claude/CLAUDE.md"), "utf8")).toContain(
+      payload.claudeInstructions.trim(),
+    );
+  });
+});
 
 function installerFixture() {
   const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3 install "));

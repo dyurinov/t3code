@@ -9,8 +9,8 @@ import { Input } from "../ui/input";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /**
- * Claude's page returns a code; Codex finishes in the browser. Key by `url` so each
- * sign-in in a batch starts fresh.
+ * Claude's page returns a code; Codex finishes in the browser. Key by `url` so a new
+ * sign-in starts fresh.
  */
 export function DevboxLoginActions({
   provider,

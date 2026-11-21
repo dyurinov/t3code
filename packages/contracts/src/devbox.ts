@@ -18,7 +18,16 @@ export const DevboxState = Schema.Literals([
 ]);
 export type DevboxState = typeof DevboxState.Type;
 
-export const DevboxCredentialState = Schema.Literals(["installed", "pool-empty", "not-installed"]);
+/**
+ * `no-login`: this machine has no sign-in for the provider yet. `unbound`: the sign-in is
+ * Formal-sealed and the box has no Formal, so it would only fail there.
+ */
+export const DevboxCredentialState = Schema.Literals([
+  "installed",
+  "not-installed",
+  "no-login",
+  "unbound",
+]);
 export type DevboxCredentialState = typeof DevboxCredentialState.Type;
 
 export const DevboxSummary = Schema.Struct({
@@ -94,21 +103,25 @@ export type DevboxDeleteInput = typeof DevboxDeleteInput.Type;
 export const DevboxLoginProvider = Schema.Literals(["claude", "codex"]);
 export type DevboxLoginProvider = typeof DevboxLoginProvider.Type;
 
-/** One provider's pool of pre-made sign-ins: each new devbox takes one. */
-export const DevboxLoginPool = Schema.Struct({
+/**
+ * This machine's one sign-in for a provider. Devboxes get its access token; the sign-in itself
+ * stays here and renews through a running box.
+ */
+export const DevboxLogin = Schema.Struct({
   provider: DevboxLoginProvider,
-  /** Signed in and waiting for a box. */
-  free: Schema.Number,
-  /** Handed to boxes that still exist. */
-  inUse: Schema.Number,
-  /** Sign-ins asked for and not yet started; they run one at a time. */
-  queued: Schema.Number,
-  /** Where the user approves the sign-in running now, once its CLI printed the link. */
+  signedIn: Schema.Boolean,
+  account: Schema.NullOr(Schema.String),
+  /** When the access token devboxes hold runs out, in epoch milliseconds. */
+  expiresAt: Schema.NullOr(Schema.Number),
+  /** Sealed by Asana's Formal connector, so it only works on boxes with Formal. */
+  sealed: Schema.Boolean,
+  signingIn: Schema.Boolean,
+  /** Where the user approves the running sign-in, once its CLI printed the link. */
   pendingUrl: Schema.NullOr(Schema.String),
-  /** Why the last sign-in failed; cleared by the next request. */
+  /** Why the last sign-in or renewal failed. */
   lastError: Schema.NullOr(Schema.String),
 });
-export type DevboxLoginPool = typeof DevboxLoginPool.Type;
+export type DevboxLogin = typeof DevboxLogin.Type;
 
 export const DevboxSubmitLoginCodeInput = Schema.Struct({
   provider: DevboxLoginProvider,
@@ -126,22 +139,13 @@ export type DeletedDevbox = typeof DeletedDevbox.Type;
 
 export const DevboxListResult = Schema.Struct({
   devboxes: Schema.Array(DevboxSummary),
-  pools: Schema.Array(DevboxLoginPool),
+  logins: Schema.Array(DevboxLogin),
   deleted: Schema.Array(DeletedDevbox),
 });
 export type DevboxListResult = typeof DevboxListResult.Type;
 
-export const DevboxStartLoginInput = Schema.Struct({
-  provider: DevboxLoginProvider,
-  /** How many sign-ins to add to the pool; they run one after another. */
-  count: Schema.optionalKey(
-    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(20)),
-  ),
-});
-export type DevboxStartLoginInput = typeof DevboxStartLoginInput.Type;
-
-export const DevboxCancelLoginsInput = Schema.Struct({ provider: DevboxLoginProvider });
-export type DevboxCancelLoginsInput = typeof DevboxCancelLoginsInput.Type;
+export const DevboxLoginInput = Schema.Struct({ provider: DevboxLoginProvider });
+export type DevboxLoginInput = typeof DevboxLoginInput.Type;
 
 export const DevboxDeleteResult = Schema.Struct({ name: Schema.String, deleted: Schema.Boolean });
 export type DevboxDeleteResult = typeof DevboxDeleteResult.Type;

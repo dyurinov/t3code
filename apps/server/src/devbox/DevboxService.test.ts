@@ -20,7 +20,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { ServerActivation } from "../serverActivation.ts";
-import * as DevboxCredentialPool from "./DevboxCredentialPool.ts";
+import * as DevboxLogins from "./DevboxLogins.ts";
 import * as DevboxService from "./DevboxService.ts";
 
 const spare = (name: string, installed = true, linked = true) => ({
@@ -30,16 +30,39 @@ const spare = (name: string, installed = true, linked = true) => ({
   task: null,
   createdAt: "2026-11-01T00:00:00Z",
   credentials: {
-    claude: installed ? "installed" : "pool-empty",
-    codex: installed ? "installed" : "pool-empty",
+    claude: installed ? "installed" : "no-login",
+    codex: installed ? "installed" : "no-login",
   },
   spare: true,
 });
 
+const codexAuth = {
+  auth_mode: "chatgpt",
+  tokens: { id_token: "id", access_token: "access", refresh_token: "" },
+};
+
 const setup = Effect.fn("test.setup")(function* (
   stored: ReadonlyArray<ReturnType<typeof spare>> = [],
   failSetup = false,
+  // What each box's sign-in renewal prints (`stream:` prefixed: printed, then ssh times out);
+  // set, a Codex renewal is due.
+  renewals?: Record<string, string>,
+  refreshToken = "rt.1.codex",
+  // A sign-in lands while the box relays, so the renewal's outcome is about a replaced login.
+  signInDuringRelay = false,
 ) {
+  let generation = 0;
+  const pushes = yield* Queue.unbounded<string>();
+  const relayed = yield* Queue.unbounded<string>();
+  const renewalDone = yield* Deferred.make<void>();
+  const rejectedTokens: Array<string> = [];
+  let renewalDue = renewals !== undefined;
+  const renewal = {
+    provider: "codex" as const,
+    refreshToken,
+    scopes: [],
+    requireFormal: false,
+  };
   const launches = yield* Queue.unbounded<ProcessRunner.ProcessRunInput>();
   const reads = yield* Queue.unbounded<void>();
   const login = yield* Deferred.make<void>();
@@ -79,25 +102,45 @@ const setup = Effect.fn("test.setup")(function* (
           HttpClient.make(() => Effect.die("Unexpected HTTP request")),
         ),
         Layer.succeed(ServerActivation, Effect.never),
-        Layer.mock(DevboxCredentialPool.DevboxCredentialPool)({
-          freeCount: () => Effect.succeed(0),
-          assignedCount: () => Effect.succeed(0),
-          pendingLogins: Effect.succeed([]),
-          mint: () =>
+        Layer.mock(DevboxLogins.DevboxLogins)({
+          info: () =>
+            Effect.sync(() => ({
+              signedIn: minted,
+              account: null,
+              expiresAt: null,
+              sealed: false,
+            })),
+          payload: Effect.sync(() => ({
+            claude: null,
+            codex: minted ? codexAuth : null,
+          })),
+          due: () => Effect.sync(() => (renewalDue ? Option.some(renewal) : Option.none())),
+          generation: () => Effect.sync(() => generation),
+          // Always relays, so only the service's own loop decides which boxes are tried.
+          refresh: (_provider, relay) =>
+            relay(renewal).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  renewalDue = false;
+                }),
+              ),
+              Effect.andThen(Deferred.succeed(renewalDone, undefined)),
+              Effect.as(true),
+            ),
+          reject: (_provider, token) =>
+            Effect.sync(() => {
+              renewalDue = false;
+              rejectedTokens.push(token);
+            }).pipe(Effect.andThen(Deferred.succeed(renewalDone, undefined)), Effect.asVoid),
+          pendingUrl: () => Effect.succeed(null),
+          signIn: () =>
             Deferred.await(login).pipe(
               Effect.tap(() =>
                 Effect.sync(() => {
                   minted = true;
                 }),
               ),
-              Effect.as("login"),
             ),
-          claim: () =>
-            Effect.succeed({
-              claude: Option.none(),
-              codex: minted ? Option.some("test-auth") : Option.none(),
-              commit: Effect.void,
-            }),
         }),
         Layer.succeed(ProcessRunner.ProcessRunner, {
           run: (input) =>
@@ -131,9 +174,37 @@ const setup = Effect.fn("test.setup")(function* (
                   stderrInvalidUtf8: false,
                 };
               }
-              if (input.command === "ssh" && input.args.at(-1)?.startsWith("python3 -c")) {
+              if (input.command === "ssh" && input.args.at(-1)?.includes("oauth/token")) {
+                const box = input.args.find((arg) => arg.startsWith("coder."))!.slice(6);
+                yield* Queue.offer(relayed, box);
+                if (signInDuringRelay) generation++;
+                const answer = renewals?.[box] ?? "";
+                if (answer.startsWith("stream:")) {
+                  input.onStdoutChunk?.(new TextEncoder().encode(answer.slice(7)));
+                  return yield* new ProcessRunner.ProcessTimeoutError({
+                    command: "ssh",
+                    argumentCount: input.args.length,
+                    timeoutMs: 120_000,
+                  });
+                }
                 return {
-                  stdout: "",
+                  stdout: answer,
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }
+              if (input.command === "ssh" && input.args.at(-1)?.startsWith("python3 -c")) {
+                yield* Queue.offer(
+                  pushes,
+                  input.args.find((arg) => arg.startsWith("coder."))!,
+                );
+                return {
+                  stdout: JSON.stringify({ codex: "installed" }),
                   stderr: "",
                   code: ChildProcessSpawner.ExitCode(0),
                   timedOut: false,
@@ -150,7 +221,17 @@ const setup = Effect.fn("test.setup")(function* (
       ),
     ),
   );
-  return { service, launches, reads, login, setupAttempts };
+  return {
+    service,
+    launches,
+    reads,
+    login,
+    setupAttempts,
+    relayed,
+    renewalDone,
+    rejectedTokens,
+    pushes,
+  };
 });
 
 describe("devbox allocation", () => {
@@ -223,11 +304,82 @@ describe("devbox allocation", () => {
       );
       yield* Queue.take(reads);
       expect(waiting.pollUnsafe()).toBeUndefined();
-      yield* service.startLogin("codex", 1);
+      yield* service.startLogin("codex");
       yield* Deferred.succeed(login, undefined);
       const ready = yield* Fiber.join(waiting);
       expect(ready.credentials.codex).toBe("installed");
       expect(ready.loginRequired).toBeNull();
+    }),
+  );
+  it.effect(
+    "renews through the next box when one lacks Formal, and stops once the provider refuses",
+    () =>
+      Effect.gen(function* () {
+        const cases = [
+          {
+            renewals: {
+              "01-a": '{"error": "unbound"}',
+              "02-b": '{"response": {"access_token": "new"}}',
+            },
+            relayed: ["01-a", "02-b"],
+            rejected: [],
+          },
+          {
+            renewals: {
+              "01-a": '{"error": "rejected", "status": 400}',
+              "02-b": '{"response": {}}',
+            },
+            relayed: ["01-a"],
+            rejected: ["rt.1.codex"],
+          },
+          // A sealed token refused by one box may only have met a proxy that did not unseal it.
+          {
+            renewals: {
+              "01-a": '{"error": "rejected", "status": 400}',
+              "02-b": '{"response": {}}',
+            },
+            refreshToken: "formalsealed:v2:codex",
+            relayed: ["01-a", "02-b"],
+            rejected: [],
+          },
+          // The answer arrived before ssh hung; it carries the only live refresh token.
+          {
+            renewals: { "01-a": 'stream:{"response": {"access_token": "new"}}', "02-b": "" },
+            relayed: ["01-a"],
+            rejected: [],
+          },
+        ];
+        for (const expected of cases) {
+          const { service, login, relayed, renewalDone, rejectedTokens } = yield* setup(
+            [spare("01-a"), spare("02-b")],
+            false,
+            expected.renewals,
+            "refreshToken" in expected ? expected.refreshToken : undefined,
+          );
+          yield* service.startLogin("codex");
+          yield* Deferred.succeed(login, undefined);
+          yield* Deferred.await(renewalDone);
+          expect(yield* Queue.takeAll(relayed)).toEqual(expected.relayed);
+          expect(rejectedTokens).toEqual(expected.rejected);
+        }
+      }),
+  );
+  it.effect("drops a renewal's refusal when a new sign-in landed during it", () =>
+    Effect.gen(function* () {
+      const { service, login, pushes, rejectedTokens } = yield* setup(
+        [spare("01-a")],
+        false,
+        { "01-a": '{"error": "rejected", "status": 400}' },
+        undefined,
+        true,
+      );
+      yield* service.startLogin("codex");
+      yield* Deferred.succeed(login, undefined);
+      // The sync pushes only after the renewal pass has reported.
+      yield* Queue.take(pushes);
+      expect(rejectedTokens).toEqual(["rt.1.codex"]);
+      const codex = (yield* service.logins).find((entry) => entry.provider === "codex");
+      expect(codex?.lastError).toBeNull();
     }),
   );
 });

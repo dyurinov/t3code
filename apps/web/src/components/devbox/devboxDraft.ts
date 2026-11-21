@@ -58,9 +58,12 @@ export async function prepareDevboxDraft(input: {
     provider.availability === "unavailable"
   )
     throw new Error(
-      t("Add a {provider} sign-in in Settings → Devboxes, then retry this draft.", {
-        provider: provider?.displayName || PROVIDER_DISPLAY_NAMES[input.driver] || input.driver,
-      }),
+      t(
+        "Sign in to {provider} in Settings → Devboxes, or to Formal on the box, then retry this draft.",
+        {
+          provider: provider?.displayName || PROVIDER_DISPLAY_NAMES[input.driver] || input.driver,
+        },
+      ),
     );
   let project: EnvironmentProject | undefined;
   if (input.project.isScratch) {

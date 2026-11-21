@@ -88,6 +88,52 @@ export function parsePairingToken(stdout: string): string | undefined {
 const REMOTE_T3_PORT = 3773;
 export { REMOTE_T3_PORT };
 
+/** Reads the host's Council skill and personal instructions as JSON on stdin. */
+export const INSTALL_PERSONALIZATION_SCRIPT = String.raw`import json, os, pathlib, sys, tempfile
+payload = json.load(sys.stdin)
+home = pathlib.Path.home()
+start = "<!-- t3-host-instructions:start -->"
+end = "<!-- t3-host-instructions:end -->"
+
+def write(path, text):
+    path = path.resolve()
+    if path.exists() and path.read_text() == text:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as target:
+        target.write(text)
+    os.replace(target.name, path)
+
+skill = home / ".agents/skills/council"
+write(skill / "SKILL.md", payload["skill"])
+for provider in [".codex", ".claude"]:
+    link = home / provider / "skills/council"
+    if link.exists() or link.is_symlink():
+        write(link / "SKILL.md", payload["skill"])
+    else:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(skill, target_is_directory=True)
+
+for relative, instructions in [
+    (".codex/AGENTS.md", payload.get("codexInstructions")),
+    (".claude/CLAUDE.md", payload.get("claudeInstructions")),
+]:
+    if instructions is None:
+        continue
+    path = home / relative
+    existing = path.read_text() if path.exists() else ""
+    block = start + "\n" + instructions.rstrip() + "\n" + end
+    if start in existing:
+        before, rest = existing.split(start, 1)
+        if end not in rest:
+            raise ValueError("Incomplete T3 host instruction block in " + relative)
+        _, after = rest.split(end, 1)
+        text = before + block + after
+    else:
+        text = (existing.rstrip() + "\n\n" if existing.strip() else "") + block + "\n"
+    write(path, text)
+`;
+
 /** Runs on a box as `sh -s -- <version|latest-nightly> <name>`, installing a verified release. */
 export const INSTALL_T3_SCRIPT = String.raw`set -eu
 version=$1
@@ -296,29 +342,127 @@ systemctl --user daemon-reload
 ` + LINK_TOKEN;
 
 /**
- * Reads a JSON payload on stdin and writes the logins it carries, owner-only:
- * `claude` → ~/.claude/.credentials.json plus the account in ~/.claude.json,
- * `codex` → ~/.codex/auth.json.
+ * Reads a `DevboxLoginPayload` on stdin and writes its access tokens, owner-only: Claude's into
+ * `claudeAiOauth` (keeping MCP sign-ins) plus the account in ~/.claude.json, Codex's as
+ * ~/.codex/auth.json. A sealed token on a box without Formal would only fail, so it is skipped
+ * and reported as `unbound`. Prints the result per provider as JSON.
  */
-export const INSTALL_CREDENTIALS_SCRIPT = String.raw`import json, os, sys
+export const INSTALL_CREDENTIALS_SCRIPT = String.raw`import json, os, subprocess, sys, tempfile
 payload = json.load(sys.stdin)
 home = os.path.expanduser("~")
-os.umask(0o077)
-if payload.get("claude"):
-    os.makedirs(f"{home}/.claude", exist_ok=True)
-    with open(f"{home}/.claude/.credentials.json", "w") as f:
-        json.dump(payload["claude"]["credentials"], f)
-    path = f"{home}/.claude.json"
-    config = json.load(open(path)) if os.path.exists(path) else {}
-    config["oauthAccount"] = payload["claude"]["oauthAccount"]
-    config["hasCompletedOnboarding"] = True
-    with open(path, "w") as f:
-        json.dump(config, f, indent=2)
-if payload.get("codex"):
-    os.makedirs(f"{home}/.codex", exist_ok=True)
-    with open(f"{home}/.codex/auth.json", "w") as f:
-        f.write(payload["codex"])
-print("installed")
+
+def formal_bound():
+    try:
+        out = subprocess.run(["formal", "auth", "status"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "You are logged in" in out.stdout + out.stderr
+
+def read(path, broken_is_empty=False):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            value = json.load(f)
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} is not a JSON object")
+        return value
+    except ValueError:
+        if broken_is_empty:
+            return {}
+        raise
+
+def write(path, value):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(fd, "w") as f:
+        json.dump(value, f, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+result = {}
+bound = None
+for provider, token in [("claude", (payload.get("claude") or {}).get("oauth", {}).get("accessToken")),
+                        ("codex", ((payload.get("codex") or {}).get("tokens") or {}).get("access_token"))]:
+    if not token:
+        continue
+    if token.startswith("formalsealed:"):
+        if bound is None:
+            bound = formal_bound()
+        if not bound:
+            result[provider] = "unbound"
+            continue
+    # One provider's broken files must not keep the other from installing.
+    try:
+        if provider == "claude":
+            # Read both files first, so a broken one leaves Claude untouched rather than half done.
+            config_path = f"{home}/.claude.json"
+            config = read(config_path)
+            path = f"{home}/.claude/.credentials.json"
+            credentials = read(path, broken_is_empty=True)
+            credentials["claudeAiOauth"] = payload["claude"]["oauth"]
+            write(path, credentials)
+            # A running Claude Code rewrites this file too; touch it only when something changed.
+            if config.get("oauthAccount") != payload["claude"]["oauthAccount"] or not config.get("hasCompletedOnboarding"):
+                config["oauthAccount"] = payload["claude"]["oauthAccount"]
+                config["hasCompletedOnboarding"] = True
+                write(config_path, config)
+        else:
+            write(f"{home}/.codex/auth.json", payload["codex"])
+    except Exception:
+        result[provider] = "failed"
+        continue
+    result[provider] = "installed"
+print(json.dumps(result))
+`;
+
+/**
+ * Refreshes a login on this box, so Formal (when bound) seals what the provider returns. Reads
+ * `DevboxRefreshRequest` JSON on stdin; prints `{"response": …}`, or an error code and HTTP
+ * status. Never the provider's error text, which could echo what was sent.
+ */
+export const REFRESH_LOGIN_SCRIPT = String.raw`import json, subprocess, sys, urllib.error, urllib.request
+request = json.load(sys.stdin)
+
+def formal_bound():
+    try:
+        out = subprocess.run(["formal", "auth", "status"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "You are logged in" in out.stdout + out.stderr
+
+if request["requireFormal"] and not formal_bound():
+    print(json.dumps({"error": "unbound"}))
+    sys.exit(0)
+if request["provider"] == "claude":
+    url = "https://platform.claude.com/v1/oauth/token"
+    body = {"grant_type": "refresh_token", "refresh_token": request["refreshToken"],
+            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e", "scope": " ".join(request["scopes"])}
+else:
+    url = "https://auth.openai.com/oauth/token"
+    body = {"client_id": "app_EMoamEEZ73f0CkXaXp7hrann", "grant_type": "refresh_token",
+            "refresh_token": request["refreshToken"], "scope": "openid profile email"}
+post = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                              headers={"Content-Type": "application/json", "User-Agent": "t3code-devbox"})
+# Each provider's word for a refresh token that is dead: Claude's flat OAuth "error", and the
+# codes OpenAI nests under "error.code".
+DEAD = {"invalid_grant", "invalid_refresh_token", "refresh_token_expired", "refresh_token_reused",
+        "refresh_token_invalidated"}
+try:
+    with urllib.request.urlopen(post, timeout=30) as answer:
+        print(json.dumps({"response": json.load(answer)}))
+except urllib.error.HTTPError as error:
+    # Only the provider's verdict on the token means it is dead, not a bad scope, client or proxy.
+    try:
+        verdict = json.loads(error.read()).get("error")
+    except (ValueError, AttributeError):
+        verdict = None
+    if isinstance(verdict, dict):
+        verdict = verdict.get("code")
+    code = "rejected" if isinstance(verdict, str) and verdict in DEAD else "unreachable"
+    print(json.dumps({"error": code, "status": error.code}))
+except (urllib.error.URLError, OSError, ValueError):
+    print(json.dumps({"error": "unreachable"}))
 `;
 
 /**
