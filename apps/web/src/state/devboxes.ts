@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m, type MessageResolver } from "../i18n/messages";
 import { createDevboxEnvironmentAtoms } from "@t3tools/client-runtime/state/devboxes";
 import type { DeletedDevbox, DevboxLogin, DevboxSummary, EnvironmentId } from "@t3tools/contracts";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
@@ -67,8 +69,9 @@ export function useWakeDevbox() {
   const forget = (name: string) =>
     setRequests((current) => {
       if (current[name] !== true) return current;
-      const { [name]: _forgotten, ...rest } = current;
-      return rest;
+      const next = { ...current };
+      delete next[name];
+      return next;
     });
   return async (name: string) => {
     if (hostEnvironmentId === null) return null;
@@ -104,27 +107,30 @@ export function devboxForEnvironment(
 }
 
 /** What a devbox's row says instead of its connection health, or null once it runs. */
-export function devboxStatusLabel(devbox: DevboxSummary): string | null {
-  if (devbox.spare) return "Spare. New devbox takes it next.";
+export function devboxStatusLabel(
+  devbox: DevboxSummary,
+  resolve: MessageResolver = m,
+): string | null {
+  if (devbox.spare) return resolve(msg("Spare. New devbox takes it next."));
   switch (devbox.state) {
     case "running":
       return devbox.credentials.claude === "unbound" || devbox.credentials.codex === "unbound"
         ? "Needs a Formal sign-in on the box."
         : null;
     case "stopped":
-      return "Sleeping. Wake it to use it here.";
+      return resolve(msg("Sleeping. Wake it to use it here."));
     case "starting":
-      return "Starting… This takes a few minutes.";
+      return resolve(msg("Starting… This takes a few minutes."));
     case "stopping":
-      return "Going to sleep…";
+      return resolve(msg("Going to sleep…"));
     case "creating":
-      return "Being set up…";
+      return resolve(msg("Being set up…"));
     case "deleting":
-      return "Deleting…";
+      return resolve(msg("Deleting…"));
     case "failed":
-      return devbox.lastError ?? "Did not start.";
+      return devbox.lastError ?? resolve(msg("Did not start."));
     case "missing":
-      return "No longer exists in Coder.";
+      return resolve(msg("No longer exists in Coder."));
   }
 }
 

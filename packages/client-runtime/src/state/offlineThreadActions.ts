@@ -10,12 +10,18 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 
 import { ConnectionTransientError } from "../connection/model.ts";
 import { EnvironmentRpcUnavailableError, isRpcClientError } from "../rpc/client.ts";
-import type { AtomCommand } from "./runtime.ts";
+import { runAtomCommand, type AtomCommand } from "./runtime.ts";
+
+export class OfflineThreadActionError extends Schema.TaggedError<OfflineThreadActionError>()(
+  "OfflineThreadActionError",
+  { message: Schema.String, cause: Schema.Defect() },
+) {}
 
 const isUnavailable = Schema.is(
   Schema.Union([ConnectionTransientError, EnvironmentRpcUnavailableError]),
@@ -283,31 +289,28 @@ export function createOfflineThreadActions(options: {
   ): AtomCommand<
     { readonly environmentId: EnvironmentId; readonly input: W },
     { readonly sequence: number },
-    E | Error
+    E | EnvironmentAuthorizationError | OfflineThreadActionError
   > {
     handlers.set(kind, (registry, environmentId, action) =>
-      command.run(registry, {
-        environmentId,
-        input: restore(action),
-      }),
+      runAtomCommand(registry, command, { environmentId, input: restore(action) }),
     );
     return {
       label: command.label,
-      run: async (registry, target) => {
+      run: (registry, target) => {
         const id = target.environmentId;
-        try {
-          if (!registry.get(options.allowedAtom(id)))
-            return AsyncResult.failure(
-              Cause.fail(
-                new EnvironmentAuthorizationError({
-                  requiredScope: AuthOrchestrationOperateScope,
-                  message: "This connection cannot organize threads.",
-                }),
-              ),
-            );
-          await state(registry, id).ready;
-          if (registry.get(options.connectedAtom(id)) && registry.get(pendingAtom(id)).length === 0)
-            return await command.run(registry, target);
+        if (!registry.get(options.allowedAtom(id)))
+          return Effect.fail(
+            new EnvironmentAuthorizationError({
+              requiredScope: AuthOrchestrationOperateScope,
+              message: "This connection cannot organize threads.",
+            }),
+          );
+        const toError = (cause: unknown) =>
+          new OfflineThreadActionError({
+            message: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          });
+        const queue = async () => {
           const { threadId, snoozedUntil, restoreUnsettledAt, orderKey } = target.input;
           const action: Action = {
             commandId: target.input.commandId ?? CommandId.make(options.storage.uuid()),
@@ -318,17 +321,19 @@ export function createOfflineThreadActions(options: {
             ...(restoreUnsettledAt === undefined ? {} : { restoreUnsettledAt }),
             ...(orderKey === undefined ? {} : { orderKey }),
           };
-          await update(registry, id, (queue) => [...queue, action]);
+          await update(registry, id, (queued) => [...queued, action]);
           options.onQueued(registry, id);
           void flush(registry, id);
-          return AsyncResult.success({
-            sequence: registry.get(options.snapshotAtom(id))?.snapshotSequence ?? 0,
-          });
-        } catch (error) {
-          return AsyncResult.failure(
-            Cause.fail(error instanceof Error ? error : new Error(String(error))),
-          );
-        }
+          return { sequence: registry.get(options.snapshotAtom(id))?.snapshotSequence ?? 0 };
+        };
+        return Effect.tryPromise({ try: () => state(registry, id).ready, catch: toError }).pipe(
+          Effect.flatMap(
+            (): Effect.Effect<{ readonly sequence: number }, E | OfflineThreadActionError> =>
+              registry.get(options.connectedAtom(id)) && registry.get(pendingAtom(id)).length === 0
+                ? command.run(registry, target)
+                : Effect.tryPromise({ try: queue, catch: toError }),
+          ),
+        );
       },
     };
   }

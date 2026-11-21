@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import type { DevboxLoginProvider, EnvironmentId } from "@t3tools/contracts";
 import { useState } from "react";
 
@@ -21,6 +22,7 @@ export function DevboxLoginActions({
   readonly url: string;
   readonly hostEnvironmentId: EnvironmentId;
 }) {
+  const gt = useGT();
   const submit = useAtomCommand(devboxEnvironment.submitLoginCode, { reportFailure: false });
   const [opened, setOpened] = useState(false);
   const [code, setCode] = useState("");
@@ -34,7 +36,7 @@ export function DevboxLoginActions({
   if (!opened || provider === "codex") {
     return (
       <Button size="xs" onClick={openSignIn}>
-        {opened ? "Open again" : "Continue sign-in"}
+        {opened ? gt("Open again") : gt("Continue sign-in")}
       </Button>
     );
   }
@@ -44,7 +46,7 @@ export function DevboxLoginActions({
     setSending(false);
     if (result._tag === "Failure") {
       toastManager.add(
-        stackedThreadToast({ type: "error", title: "The sign-in did not take that code" }),
+        stackedThreadToast({ type: "error", title: gt("The sign-in did not take that code") }),
       );
       return;
     }
@@ -62,13 +64,13 @@ export function DevboxLoginActions({
         id={`devbox-login-code-${provider}`}
         size="sm"
         className="w-56"
-        placeholder="Paste the code from the page"
+        placeholder={gt("Paste the code from the page")}
         value={code}
         onChange={(event) => setCode(event.target.value)}
         autoFocus
       />
       <Button size="xs" type="submit" disabled={sending || code.trim().length === 0}>
-        Sign in
+        <T>Sign in</T>
       </Button>
     </form>
   );

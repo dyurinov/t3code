@@ -130,7 +130,7 @@ describe("readEnvironmentFromLoginShell", () => {
           encoding: "utf8",
           env: { PATH: process.env.PATH },
         }).trim();
-        NodeFS.copyFileSync(printenv, NodePath.join(tools, "printenv"));
+        NodeFS.symlinkSync(printenv, NodePath.join(tools, "printenv"));
         vi.stubEnv("PATH", tools);
         const shellPath = NodePath.join(home, "bin");
         const bashEnv = NodePath.join(home, "env.bash");
@@ -666,6 +666,17 @@ describe("runsGitWithoutConsole", () => {
 
   it.each([
     [["rev-parse", "--git-path", "index"], true],
+    [
+      [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index",
+        "--git-common-dir",
+        "--show-toplevel",
+      ],
+      true,
+    ],
     [["--git-dir", "C:\\repo\\.git", "symbolic-ref", "refs/remotes/origin/HEAD"], true],
     [["remote", "get-url", "--", "origin"], true],
     [["config", "--get", "branch.main.pushRemote"], true],

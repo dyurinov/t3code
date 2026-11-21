@@ -18,7 +18,7 @@ import { environmentProjects, projectEnvironment } from "../../state/projects";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession, readEnvironmentScope } from "../../state/session";
 import { waitForAtomValue } from "../../state/waitForAtomValue";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 
 export async function prepareDevboxDraft(input: {
   readonly draftId: string;
@@ -67,7 +67,7 @@ export async function prepareDevboxDraft(input: {
     );
   let project: EnvironmentProject | undefined;
   if (input.project.isScratch) {
-    const opened = await projectEnvironment.openScratch.run(appAtomRegistry, {
+    const opened = await runAtomCommand(appAtomRegistry, projectEnvironment.openScratch, {
       environmentId,
       input: {},
     });
