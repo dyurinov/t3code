@@ -14,6 +14,7 @@ let slowRpcAckThresholdMs = SLOW_RPC_ACK_THRESHOLD_MS;
 
 export interface SlowRpcAckRequest {
   readonly requestId: string;
+  readonly environmentId?: string;
   readonly startedAt: string;
   readonly startedAtMs: number;
   readonly tag: string;
@@ -33,6 +34,8 @@ const untrackedRpcAckMethods = new Set<string>([
   WS_METHODS.serverGetUsageSummary,
   WS_METHODS.serverReportClientActivity,
   WS_METHODS.sourceControlSignInWait,
+  // Polled in the background; each call waits on the Coder CLI, which can take this long.
+  WS_METHODS.devboxesList,
 ]);
 const longRunningRpcAckMethods = new Set<string>([
   WS_METHODS.serverUpdateProvider,
@@ -68,7 +71,12 @@ function rpcAckThresholdMs(method: string): number {
     : slowRpcAckThresholdMs;
 }
 
-export function trackRpcRequestSent(requestId: string, method: string, tag = method): void {
+export function trackRpcRequestSent(
+  requestId: string,
+  method: string,
+  tag = method,
+  environmentId?: string,
+): void {
   if (!shouldTrackRpcAck(method)) {
     return;
   }
@@ -84,6 +92,7 @@ export function trackRpcRequestSent(requestId: string, method: string, tag = met
     startedAtMs,
     tag,
     thresholdMs,
+    ...(environmentId === undefined ? {} : { environmentId }),
   };
   const timeoutId = setTimeout(() => {
     pendingRpcAckRequests.delete(requestId);

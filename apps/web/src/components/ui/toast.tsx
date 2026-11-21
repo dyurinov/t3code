@@ -82,9 +82,14 @@ type ToastManagerEvent = Parameters<ToastManagerListener>[0];
  * from before the first render (and while the root error view replaces the providers), so hold
  * those until a provider listens.
  */
-function recordToastIssue(options: Partial<Parameters<BaseToastManager["add"]>[0]>): void {
-  if (options.type !== "error" && options.type !== "warning") return;
-  if (typeof options.title !== "string" || options.title.length === 0) return;
+function recordToastIssue(
+  options: Partial<Parameters<BaseToastManager["add"]>[0]>,
+  previous?: string,
+): string | undefined {
+  if (options.type !== "error" && options.type !== "warning") return undefined;
+  if (typeof options.title !== "string" || options.title.length === 0) return undefined;
+  const recorded = `${options.type}:${options.title}`;
+  if (recorded === previous) return recorded;
   const threadRef = options.data?.threadRef ?? null;
   const environmentId = threadRef?.environmentId ?? options.data?.environmentId;
   recordClientIssue({
@@ -95,6 +100,7 @@ function recordToastIssue(options: Partial<Parameters<BaseToastManager["add"]>[0
     ...(environmentId === undefined ? {} : { environmentId }),
     ...(threadRef === null ? {} : { threadId: threadRef.threadId }),
   });
+  return recorded;
 }
 
 function createBufferedToastManager(): BaseToastManager {
@@ -108,15 +114,32 @@ function createBufferedToastManager(): BaseToastManager {
     }
     for (const listener of listeners) listener(event);
   });
+  // A toast updated in place (a changing count) is one issue until its title or level changes.
+  const recordedById = new Map<string, string>();
+  const remember = (id: string, recorded: string | undefined) => {
+    if (recorded === undefined) recordedById.delete(id);
+    else recordedById.set(id, recorded);
+  };
   return {
     ...manager,
     add(options) {
-      recordToastIssue(options);
-      return manager.add(options);
+      const recorded = recordToastIssue(options);
+      const id = manager.add(options);
+      remember(id, recorded);
+      return id;
     },
     update(id, options) {
-      if (typeof options !== "function") recordToastIssue(options);
+      if (
+        typeof options !== "function" &&
+        (options.title !== undefined || options.type !== undefined)
+      )
+        remember(id, recordToastIssue(options, recordedById.get(id)));
       manager.update(id, options);
+    },
+    close(id) {
+      if (id === undefined) recordedById.clear();
+      else recordedById.delete(id);
+      manager.close(id);
     },
     " subscribe"(listener) {
       listeners.add(listener);

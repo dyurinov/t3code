@@ -10,6 +10,7 @@ import { startAppServices } from "./appInit";
 import { AppRoot } from "./AppRoot";
 import { whenLocaleReady } from "./i18n/runtime";
 import { reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+import { noteComponentStack } from "./lib/clientIssueReporter";
 
 const router = startAppServices();
 
@@ -41,7 +42,12 @@ export const startup = Promise.all([
   .then(([ManagedAuthShell]) => {
     // Route chunk failures resolve router.load() and surface later through the error boundary.
     if (reloadScheduled) return;
-    ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    ReactDOM.createRoot(document.getElementById("root") as HTMLElement, {
+      onCaughtError: (error, errorInfo) => {
+        noteComponentStack(error, errorInfo.componentStack);
+        console.error(error);
+      },
+    }).render(
       <React.StrictMode>
         {ManagedAuthShell && clerkPublishableKey ? (
           <ManagedAuthShell publishableKey={clerkPublishableKey}>{app}</ManagedAuthShell>

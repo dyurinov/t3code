@@ -13,7 +13,7 @@ import {
 import { msg, T, useGT, Var } from "gt-react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { recordClientIssue } from "../lib/clientIssueReporter";
+import { componentStackOf, recordClientIssue } from "../lib/clientIssueReporter";
 
 import { APP_DISPLAY_NAME, APP_VERSION } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
@@ -255,10 +255,12 @@ function RootRouteErrorView({ error }: ErrorComponentProps) {
   const report = errorReport(error, pathname);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records the crash once in the host's client issue log, outside React
   useEffect(() => {
+    const componentStack = componentStackOf(error);
     recordClientIssue({
       level: "error",
       source: "error-screen",
       title: message,
+      ...(componentStack === undefined ? {} : { description: componentStack.trim() }),
       ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
     });
   }, [error, message]);

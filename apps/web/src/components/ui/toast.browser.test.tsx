@@ -26,6 +26,22 @@ describe("toastManager", () => {
     await expect.element(page.getByText("Raised before the first render")).toBeVisible();
   });
 
+  it("logs a toast updated in place once, until its title changes", () => {
+    const logged = (title: string) =>
+      JSON.parse(sessionStorage.getItem("t3code:pending-client-issues") ?? "[]").filter(
+        (issue: { title: string }) => issue.title === title,
+      ).length;
+    const id = toastManager.add({ type: "warning", title: "Slow", description: "1 request" });
+    toastManager.update(id, { type: "warning", title: "Slow", description: "2 requests" });
+    toastManager.update(id, { type: "warning", title: "Slow", description: "1 request" });
+    expect(logged("Slow")).toBe(1);
+    toastManager.update(id, { type: "error", title: "Failed" });
+    expect(logged("Failed")).toBe(1);
+    toastManager.close(id);
+    toastManager.add({ type: "warning", title: "Slow" });
+    expect(logged("Slow")).toBe(2);
+  });
+
   it("exposes one Notifications landmark when both toast providers mount", async () => {
     await using _screen = await render(
       <ToastProvider>

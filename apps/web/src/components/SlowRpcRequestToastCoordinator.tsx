@@ -1,3 +1,4 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import { msg, T, Var } from "gt-react";
 
 import { m } from "../i18n/messages";
@@ -51,8 +52,13 @@ export function startSlowRpcRequestToasts(): () => void {
       return;
     }
 
+    const environmentIds = new Set(slowRequests.map((request) => request.environmentId));
+    const [onlyEnvironmentId] = environmentIds;
     const nextToast = {
       data: {
+        ...(environmentIds.size === 1 && onlyEnvironmentId !== undefined
+          ? { environmentId: EnvironmentId.make(onlyEnvironmentId) }
+          : {}),
         expandableContent: <SlowRequestDetails requests={slowRequests} />,
         expandableDescriptionTrigger: true,
         expandableLabels: { collapse: m(msg("Hide requests")), expand: m(msg("Show requests")) },

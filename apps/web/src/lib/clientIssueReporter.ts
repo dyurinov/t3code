@@ -67,6 +67,18 @@ export function recordClientIssue(issue: ClientIssueInput): void {
   for (const wake of wakers) wake();
 }
 
+const componentStacks = new WeakMap<object, string>();
+
+/** React reports which component threw only to the root; the error screen logs it from here. */
+export function noteComponentStack(error: unknown, componentStack: string | undefined): void {
+  if (typeof error === "object" && error !== null && componentStack)
+    componentStacks.set(error, componentStack);
+}
+
+export function componentStackOf(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null ? componentStacks.get(error) : undefined;
+}
+
 const errorText = (value: unknown) =>
   value instanceof Error ? value.message : typeof value === "string" ? value : String(value);
 
@@ -77,13 +89,16 @@ export const layer = Layer.effectDiscard(
     const flushRequests = yield* Queue.sliding<void>(1);
     const requestFlush = () => Queue.offerUnsafe(flushRequests, undefined);
 
-    const onError = (event: ErrorEvent) =>
+    const onError = (event: ErrorEvent) => {
+      // A benign layout warning browsers raise as an error event; it buried real issues.
+      if (event.error == null && event.message?.startsWith("ResizeObserver loop")) return;
       recordClientIssue({
         level: "error",
         source: "window-error",
         title: errorText(event.error ?? event.message),
         ...(event.error instanceof Error && event.error.stack ? { stack: event.error.stack } : {}),
       });
+    };
     const onRejection = (event: PromiseRejectionEvent) =>
       recordClientIssue({
         level: "error",
