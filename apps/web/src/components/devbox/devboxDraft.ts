@@ -46,22 +46,45 @@ export async function prepareDevboxDraft(input: {
   });
   const config = appAtomRegistry.get(configAtom);
   if (!configured || !config) throw new Error(t("{name} did not finish loading.", { name }));
-  const provider =
-    config.providers.find(
+  const findProvider = (current: typeof config) =>
+    current.providers.find(
       (entry) => entry.instanceId === input.selection.instanceId && entry.driver === input.driver,
-    ) ?? config.providers.find((entry) => entry.driver === input.driver);
-  if (
-    !provider?.enabled ||
-    !provider.installed ||
-    provider.status === "error" ||
-    provider.auth.status === "unauthenticated" ||
-    provider.availability === "unavailable"
-  )
+    ) ?? current.providers.find((entry) => entry.driver === input.driver);
+  const usable = (
+    entry: ReturnType<typeof findProvider>,
+  ): entry is NonNullable<ReturnType<typeof findProvider>> =>
+    entry !== undefined &&
+    entry.enabled &&
+    entry.installed &&
+    entry.status !== "error" &&
+    entry.auth.status !== "unauthenticated" &&
+    entry.availability !== "unavailable";
+  let provider = findProvider(config);
+  if (!usable(provider)) {
+    // The box checked its providers when it booted; the host may have installed a fresh
+    // token since, which leaves its credential state "installed" and triggers no re-check.
+    await runAtomCommand(appAtomRegistry, serverEnvironment.refreshProviders, {
+      environmentId,
+      input: { refreshModels: false },
+    });
+    await waitForAtomValue({
+      registry: appAtomRegistry,
+      atom: configAtom,
+      predicate: (current) => current !== null && usable(findProvider(current)),
+      timeoutMs: 20_000,
+    });
+    const refreshed = appAtomRegistry.get(configAtom);
+    provider = refreshed === null ? provider : findProvider(refreshed);
+  }
+  if (!usable(provider))
     throw new Error(
       t(
         "Sign in to {provider} in Settings → Devboxes, or to Formal on the box, then retry this draft.",
         {
-          provider: provider?.displayName || PROVIDER_DISPLAY_NAMES[input.driver] || input.driver,
+          provider:
+            findProvider(config)?.displayName ||
+            PROVIDER_DISPLAY_NAMES[input.driver] ||
+            input.driver,
         },
       ),
     );
