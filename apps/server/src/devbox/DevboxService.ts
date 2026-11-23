@@ -1339,7 +1339,20 @@ export const make = Effect.gen(function* () {
         yield* setTransient(name, { state: "starting", lastError: null });
         const workspace = (yield* workspaces).get(name);
         if (workspace?.latest_build.status !== "running")
-          yield* coder(["start", name, "--yes"], "15 minutes");
+          // An autoupdating box moves to the template's latest version, which requires the
+          // marker z devbox create sends; a default is ignored by templates without it, and
+          // is only used rather than prompted for with --use-parameter-defaults.
+          yield* coder(
+            [
+              "start",
+              name,
+              "--yes",
+              "--use-parameter-defaults",
+              "--parameter-default",
+              "created_via=z-devbox",
+            ],
+            "15 minutes",
+          );
         yield* connect(record);
       }).pipe(
         Effect.tapError((error) =>
