@@ -5319,6 +5319,8 @@
   "393ae2ad12bd8b61": "Sleep devbox",
   "6ccae3eb0d5b31fe": "Wake devbox",
   "6475a34d3718a715": "Delete devbox…",
+  "b4fcfcbee99a743b": "T3 Code wurde neu gestartet, während „{title}“ auf seine Devbox wartete. Die Nachricht ist wieder im Entwurf.",
+  "491f464882890f2a": "T3 Code wurde neu gestartet, während „{title}“ auf seine Devbox wartete.",
   "f903e7f0ca23602c": "Wake",
   "ac0bbb4022680040": "Die Verbindung mit {name} wurde nicht rechtzeitig hergestellt.",
   "9bbfa95be0f9ee84": "{name} wurde nicht vollständig geladen.",

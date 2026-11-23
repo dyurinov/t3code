@@ -5324,6 +5324,8 @@
   "393ae2ad12bd8b61": "Sleep devbox",
   "6ccae3eb0d5b31fe": "Wake devbox",
   "6475a34d3718a715": "Delete devbox…",
+  "b4fcfcbee99a743b": "“{title}”等待其 devbox 时 T3 Code 重新启动了。消息已放回草稿。",
+  "491f464882890f2a": "“{title}”等待其 devbox 时 T3 Code 重新启动了。",
   "f903e7f0ca23602c": "Wake",
   "ac0bbb4022680040": "未能及时连接到 {name}。",
   "9bbfa95be0f9ee84": "{name} 未能完成加载。",

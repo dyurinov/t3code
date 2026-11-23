@@ -5317,6 +5317,8 @@
   "393ae2ad12bd8b61": "Sleep devbox",
   "6ccae3eb0d5b31fe": "Wake devbox",
   "6475a34d3718a715": "Delete devbox…",
+  "b4fcfcbee99a743b": "T3 Code se reinició mientras «{title}» esperaba su devbox. El mensaje vuelve a estar en su borrador.",
+  "491f464882890f2a": "T3 Code se reinició mientras «{title}» esperaba su devbox.",
   "f903e7f0ca23602c": "Wake",
   "ac0bbb4022680040": "{name} no se conectó a tiempo.",
   "9bbfa95be0f9ee84": "{name} no terminó de cargar.",

@@ -1,6 +1,19 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { msg } from "gt-react";
 import { useEffect } from "react";
+
+import { DraftId, restoreFailedDraftThread, useComposerDraftStore } from "../../composerDraftStore";
+import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
+import { m } from "../../i18n/messages";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import {
+  pendingDevboxSends,
+  savePendingDevboxSends,
+  takePendingDevboxSends,
+  type PendingDevboxSend,
+} from "../../state/devboxPendingSends";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 
 import { environmentCatalog } from "../../connection/catalog";
 import { connectPairing } from "../../connection/onboarding";
@@ -8,6 +21,7 @@ import { clientHostEnvironmentAtom } from "../../state/clientHostEnvironment";
 import {
   devboxClaims,
   devboxEnvironment,
+  devboxSendWaitsAtom,
   useDevboxes,
   useSettleDevboxWakeRequests,
 } from "../../state/devboxes";
@@ -23,6 +37,59 @@ const woken = new Set<EnvironmentId>();
 const forgotten = new Set<EnvironmentId>();
 // Each box's sign-in states as last seen, to notice the host installing one.
 const credentialsSeen = new Map<EnvironmentId, string>();
+let pendingSendsTracked = false;
+
+/** Puts a message a restart cut off while it waited on its devbox back in its draft. */
+function restorePendingDevboxSend(send: PendingDevboxSend) {
+  const store = useComposerDraftStore.getState();
+  const draftId = send.draftId === null ? null : DraftId.make(send.draftId);
+  const draftThread = draftId === null ? undefined : store.draftThreadsByThreadKey[draftId];
+  let restored = false;
+  if (draftId !== null && draftThread !== undefined) {
+    restoreFailedDraftThread(draftId, draftThread, draftThread.threadId);
+    if (send.text.length > 0 && !store.getComposerDraft(draftId)?.prompt.trim()) {
+      store.setPrompt(draftId, send.text);
+      restored = true;
+    }
+  }
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: m(msg("Message not sent")),
+      description: restored
+        ? m(
+            msg(
+              "T3 Code restarted while “{title}” waited for its devbox. It is back in its draft.",
+            ),
+            {
+              title: send.title,
+            },
+          )
+        : m(msg("T3 Code restarted while “{title}” waited for its devbox."), {
+            title: send.title,
+          }),
+      timeout: 0,
+      data: { hideCopyButton: true },
+      ...(!restored && send.text.length > 0
+        ? {
+            actionProps: {
+              children: m(msg("Copy message")),
+              onClick: () => {
+                void writeTextToClipboard(send.text, {
+                  target: "failed message",
+                  unavailableMessage: msg(
+                    "Clipboard API is unavailable while copying failed message.",
+                  ),
+                  failureMessage: msg("Failed to copy failed message to the clipboard."),
+                }).catch(() => undefined);
+              },
+            },
+          }
+        : {}),
+    }),
+  );
+}
+
 // A box just up is still running its startup script, which can starve the provider probe.
 const PROVIDER_RECHECK_DELAY_MS = 20_000;
 
@@ -35,6 +102,16 @@ export function DevboxPairingCoordinator() {
   const { hostEnvironmentId, available, devboxes, listedDevboxes, deleted, refresh } =
     useDevboxes();
   const settleWakeRequests = useSettleDevboxWakeRequests(listedDevboxes);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors waiting devbox sends into storage so a restart cannot drop them unseen
+  useEffect(() => {
+    if (pendingSendsTracked) return;
+    pendingSendsTracked = true;
+    const leftovers = takePendingDevboxSends();
+    appAtomRegistry.subscribe(devboxSendWaitsAtom, (waits) =>
+      savePendingDevboxSends(pendingDevboxSends(waits)),
+    );
+    for (const send of leftovers) restorePendingDevboxSend(send);
+  }, []);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops this client's wake requests once the host's list has caught up with them
   useEffect(() => {
     settleWakeRequests();

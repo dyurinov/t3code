@@ -5299,6 +5299,8 @@
   "393ae2ad12bd8b61": "Sleep devbox",
   "6ccae3eb0d5b31fe": "Wake devbox",
   "6475a34d3718a715": "Delete devbox…",
+  "b4fcfcbee99a743b": "“{title}”이(가) devbox를 기다리는 동안 T3 Code가 다시 시작되었습니다. 메시지가 초안으로 돌아갔습니다.",
+  "491f464882890f2a": "“{title}”이(가) devbox를 기다리는 동안 T3 Code가 다시 시작되었습니다.",
   "f903e7f0ca23602c": "Wake",
   "ac0bbb4022680040": "{name}에 시간 내에 연결하지 못했습니다.",
   "9bbfa95be0f9ee84": "{name}의 로딩이 완료되지 않았습니다.",

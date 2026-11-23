@@ -5318,6 +5318,8 @@
   "393ae2ad12bd8b61": "Sleep devbox",
   "6ccae3eb0d5b31fe": "Wake devbox",
   "6475a34d3718a715": "Delete devbox…",
+  "b4fcfcbee99a743b": "T3 Code a redémarré pendant que « {title} » attendait sa devbox. Le message est de retour dans son brouillon.",
+  "491f464882890f2a": "T3 Code a redémarré pendant que « {title} » attendait sa devbox.",
   "f903e7f0ca23602c": "Wake",
   "ac0bbb4022680040": "{name} ne s’est pas connecté à temps.",
   "9bbfa95be0f9ee84": "{name} n’a pas fini de charger.",

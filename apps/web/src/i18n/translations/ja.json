@@ -5302,6 +5302,8 @@
   "393ae2ad12bd8b61": "Sleep devbox",
   "6ccae3eb0d5b31fe": "Wake devbox",
   "6475a34d3718a715": "Delete devbox…",
+  "b4fcfcbee99a743b": "「{title}」が devbox を待っている間に T3 Code が再起動しました。メッセージは下書きに戻っています。",
+  "491f464882890f2a": "「{title}」が devbox を待っている間に T3 Code が再起動しました。",
   "f903e7f0ca23602c": "Wake",
   "ac0bbb4022680040": "{name} に時間内に接続できませんでした。",
   "9bbfa95be0f9ee84": "{name} の読み込みが完了しませんでした。",
