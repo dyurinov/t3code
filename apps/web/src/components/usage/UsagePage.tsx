@@ -540,7 +540,7 @@ export function UsagePage() {
           <AppRouteModalClose />
         </header>
 
-        <ScrollArea className="min-h-0 flex-1">
+        <ScrollArea className="min-h-0 flex-1" observeContent>
           <WorkspacePageContainer width="wide">
             {showingDevboxes ? (
               <DevboxUsage window={window} refreshing={isRefreshing} />
