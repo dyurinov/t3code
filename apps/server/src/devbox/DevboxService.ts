@@ -218,6 +218,7 @@ const KEEP_ALIVE_INTERVAL = Duration.minutes(10);
 const LOGIN_SYNC_INTERVAL = Duration.minutes(10);
 const KEEP_ALIVE_EXTENSION = "1h";
 const CREATE_TIMEOUT = Duration.minutes(60);
+const BIND_RETRY_AFTER = Duration.minutes(30);
 const SSH_NOISE = /startup script|troubleshooting|incomplete/iu;
 
 const errorText = (error: unknown) =>
@@ -272,6 +273,7 @@ export const make = Effect.gen(function* () {
   // refused the sign-in (user signs in again), or the box has no Formal (user binds it).
   const refused = new Set<DevboxLoginProvider>();
   const unboundBoxes = new Set<string>();
+  const bindAttempts = new Map<string, number>();
 
   const devboxError = (reason: DevboxError["reason"]) => (cause: unknown) =>
     new DevboxError({ reason, message: errorText(cause) });
@@ -376,6 +378,24 @@ export const make = Effect.gen(function* () {
               ),
         ),
       );
+  const z = (args: ReadonlyArray<string>, timeout: Duration.Input) =>
+    run(
+      "bash",
+      [
+        "-c",
+        'source "$CODEZ/admin/mac.bashrc" >/dev/null 2>&1; exec "$CODEZ/asana2/asana/tools/zoe/bin/z" "$@"',
+        "t3-devbox",
+        ...args,
+      ],
+      {
+        cwd: codezDir,
+        timeout,
+        env: {
+          CODEZ: codezDir,
+          PYTHONPATH: [codezDir, pythonPath].filter(Boolean).join(":"),
+        },
+      },
+    );
   const coder = (args: ReadonlyArray<string>, timeout?: Duration.Input) =>
     run("coder", args, { timeout: timeout ?? "5 minutes" }).pipe(
       Effect.mapError(devboxError("coder")),
@@ -781,6 +801,26 @@ export const make = Effect.gen(function* () {
     yield* ssh(name, `python3 -c ${shellQuote(INSTALL_PERSONALIZATION_SCRIPT)}`, body, "1 minute");
   });
 
+  /**
+   * Tags the box with formal:owner from this machine, then signs Formal in on it. `z devbox
+   * create` binds as its last step, but a failure there (an expired SSO session) only logs.
+   */
+  const bindFormal = Effect.fn("DevboxService.bindFormal")(function* (name: string) {
+    const now = yield* Clock.currentTimeMillis;
+    const last = bindAttempts.get(name);
+    if (last !== undefined && now - last < Duration.toMillis(BIND_RETRY_AFTER)) return false;
+    bindAttempts.set(name, now);
+    return yield* z(
+      ["devbox", "ssh", "--enable-formal", name, "--", "formal", "auth", "login"],
+      "3 minutes",
+    ).pipe(
+      Effect.as(true),
+      Effect.catch((error) =>
+        Effect.logWarning("devbox Formal binding failed", { name, error }).pipe(Effect.as(false)),
+      ),
+    );
+  });
+
   // Writes this machine's access tokens to a box. Its refresh tokens never leave this machine.
   const pushLogins = Effect.fn("DevboxService.pushLogins")(function* (record: DevboxRecord) {
     const payload = yield* logins.payload;
@@ -790,15 +830,21 @@ export const make = Effect.gen(function* () {
     } = {};
     if (payload.claude !== null || payload.codex !== null) {
       const body = yield* encodeJson(payload).pipe(Effect.mapError(devboxError("provision")));
-      const stdout = yield* ssh(
+      const install = ssh(
         record.name,
         `python3 -c ${shellQuote(INSTALL_CREDENTIALS_SCRIPT)}`,
         body,
         "1 minute",
-      );
-      result = yield* decodeInstallResult(stdout.trim().split("\n").at(-1) ?? "").pipe(
+      ).pipe(
+        Effect.flatMap((stdout) => decodeInstallResult(stdout.trim().split("\n").at(-1) ?? "")),
         Effect.mapError(devboxError("provision")),
       );
+      result = yield* install;
+      if (
+        (result.claude === "unbound" || result.codex === "unbound") &&
+        (yield* bindFormal(record.name))
+      )
+        result = yield* install;
       // A box that skipped a token (no Formal yet) gets it again on the next sync.
       const complete = (["claude", "codex"] as const).every(
         (provider) => result[provider] !== "unbound" && result[provider] !== "failed",
@@ -1169,23 +1215,7 @@ export const make = Effect.gen(function* () {
       "watcher_enabled=true",
       ...(branch ? ["--branch", branch] : []),
     ];
-    yield* run(
-      "bash",
-      [
-        "-c",
-        'source "$CODEZ/admin/mac.bashrc" >/dev/null 2>&1; exec "$CODEZ/asana2/asana/tools/zoe/bin/z" "$@"',
-        "t3-devbox",
-        ...args,
-      ],
-      {
-        cwd: codezDir,
-        timeout: CREATE_TIMEOUT,
-        env: {
-          CODEZ: codezDir,
-          PYTHONPATH: [codezDir, pythonPath].filter(Boolean).join(":"),
-        },
-      },
-    ).pipe(
+    yield* z(args, CREATE_TIMEOUT).pipe(
       Effect.mapError(devboxError("coder")),
       // z's later steps (SSO, commit-signing keys) can fail after the box itself is up.
       Effect.catch((error) =>
@@ -1390,6 +1420,7 @@ export const make = Effect.gen(function* () {
           }
           pushed.delete(name);
           unboundBoxes.delete(name);
+          bindAttempts.delete(name);
           yield* Ref.update(records, (current) => {
             const next = new Map(current);
             next.delete(name);
@@ -1780,6 +1811,7 @@ export const make = Effect.gen(function* () {
     yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
     pushed.delete(name);
     unboundBoxes.delete(name);
+    bindAttempts.delete(name);
     const now = yield* Clock.currentTimeMillis;
     yield* Ref.update(history, (current) => [
       ...current.filter((box) => box.name !== name),

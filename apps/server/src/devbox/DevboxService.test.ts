@@ -51,8 +51,11 @@ const setup = Effect.fn("test.setup")(function* (
   refreshToken = "rt.1.codex",
   // A sign-in lands while the box relays, so the renewal's outcome is about a replaced login.
   signInDuringRelay = false,
+  // Boxes skip sealed sign-ins until this machine binds them to Formal.
+  unbound = false,
 ) {
   let generation = 0;
+  const binds = yield* Queue.unbounded<string>();
   const pushes = yield* Queue.unbounded<string>();
   const relayed = yield* Queue.unbounded<string>();
   const renewalDone = yield* Deferred.make<void>();
@@ -206,7 +209,22 @@ const setup = Effect.fn("test.setup")(function* (
                   input.args.find((arg) => arg.startsWith("coder."))!,
                 );
                 return {
-                  stdout: JSON.stringify({ codex: "installed" }),
+                  stdout: JSON.stringify({ codex: unbound ? "unbound" : "installed" }),
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }
+              const bind = input.args.indexOf("--enable-formal");
+              if (input.command === "bash" && bind !== -1) {
+                yield* Queue.offer(binds, input.args[bind + 1]!);
+                unbound = false;
+                return {
+                  stdout: "",
                   stderr: "",
                   code: ChildProcessSpawner.ExitCode(0),
                   timedOut: false,
@@ -233,6 +251,7 @@ const setup = Effect.fn("test.setup")(function* (
     renewalDone,
     rejectedTokens,
     pushes,
+    binds,
   };
 });
 
@@ -311,6 +330,26 @@ describe("devbox allocation", () => {
       const ready = yield* Fiber.join(waiting);
       expect(ready.credentials.codex).toBe("installed");
       expect(ready.loginRequired).toBeNull();
+    }),
+  );
+  it.effect("binds a box that lacks Formal to it, then gives it the sign-in", () =>
+    Effect.gen(function* () {
+      const { service, login, binds } = yield* setup(
+        [spare("01-ready", false)],
+        false,
+        undefined,
+        undefined,
+        false,
+        true,
+      );
+      const waiting = yield* Effect.forkChild(
+        service.awaitReady("01-ready", "1 minute", { waitForLogin: true }),
+      );
+      yield* service.startLogin("codex");
+      yield* Deferred.succeed(login, undefined);
+      const ready = yield* Fiber.join(waiting);
+      expect(ready.credentials.codex).toBe("installed");
+      expect(yield* Queue.takeAll(binds)).toEqual(["01-ready"]);
     }),
   );
   it.effect(
