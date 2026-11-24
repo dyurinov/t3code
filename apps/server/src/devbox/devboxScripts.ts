@@ -90,7 +90,7 @@ export { REMOTE_T3_PORT };
 /** Where this machine's T3 server answers on a box, through the reverse SSH forward. */
 export const HOST_PORT_ON_BOX = 13799;
 
-/** Reads the host's Council skill and personal instructions as JSON on stdin. */
+/** Reads the host's shared skills and personal instructions as JSON on stdin. */
 export const INSTALL_PERSONALIZATION_SCRIPT = String.raw`import json, os, pathlib, sys, tempfile
 payload = json.load(sys.stdin)
 home = pathlib.Path.home()
@@ -106,15 +106,18 @@ def write(path, text):
         target.write(text)
     os.replace(target.name, path)
 
-skill = home / ".agents/skills/council"
-write(skill / "SKILL.md", payload["skill"])
-for provider in [".codex", ".claude"]:
-    link = home / provider / "skills/council"
-    if link.exists() or link.is_symlink():
-        write(link / "SKILL.md", payload["skill"])
-    else:
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(skill, target_is_directory=True)
+for name, files in payload["skills"].items():
+    skill = home / ".agents/skills" / name
+    for relative, text in files.items():
+        write(skill / relative, text)
+    for provider in [".codex", ".claude"]:
+        link = home / provider / "skills" / name
+        if link.exists() or link.is_symlink():
+            for relative, text in files.items():
+                write(link / relative, text)
+        else:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(skill, target_is_directory=True)
 
 for relative, instructions in [
     (".codex/AGENTS.md", payload.get("codexInstructions")),

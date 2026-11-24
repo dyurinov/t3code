@@ -170,7 +170,7 @@ describe("devbox sign-in renewal", () => {
 });
 
 describe("devbox personal instructions", () => {
-  it("installs Council for both providers and updates only its managed instruction block", () => {
+  it("copies shared skill files for both providers and updates the managed instruction block", () => {
     const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-personalization-"));
     using _cleanup = {
       [Symbol.dispose]: () => NodeFS.rmSync(home, { recursive: true, force: true }),
@@ -180,7 +180,16 @@ describe("devbox personal instructions", () => {
     NodeFS.writeFileSync(instructions, "Keep my existing instructions.\n");
     NodeFS.writeFileSync(NodePath.join(home, ".codex", "auth.json"), "untouched credentials");
     const payload = {
-      skill: "---\nname: council\ndescription: Review with the council.\n---\nCouncil workflow\n",
+      skills: {
+        council: {
+          "SKILL.md":
+            "---\nname: council\ndescription: Review with the council.\n---\nCouncil workflow\n",
+        },
+        dig: {
+          "agents/openai.yaml": "policy:\n  allow_implicit_invocation: false\n",
+          "SKILL.md": "---\nname: dig\ndisable-model-invocation: true\n---\nFind evidence\n",
+        },
+      },
       codexInstructions: "## Council\nUse reviewer A and reviewer B only.\n",
       claudeInstructions: "## Council\nUse reviewer A and reviewer B only.\n",
     };
@@ -192,9 +201,13 @@ describe("devbox personal instructions", () => {
       });
     run();
     for (const provider of [".agents", ".codex", ".claude"]) {
-      expect(
-        NodeFS.readFileSync(NodePath.join(home, provider, "skills/council/SKILL.md"), "utf8"),
-      ).toBe(payload.skill);
+      for (const [name, files] of Object.entries(payload.skills)) {
+        for (const [relative, content] of Object.entries(files)) {
+          expect(
+            NodeFS.readFileSync(NodePath.join(home, provider, "skills", name, relative), "utf8"),
+          ).toBe(content);
+        }
+      }
     }
     const first = NodeFS.readFileSync(instructions, "utf8");
     expect(first).toContain("Keep my existing instructions.");

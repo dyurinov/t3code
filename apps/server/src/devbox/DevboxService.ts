@@ -789,13 +789,23 @@ export const make = Effect.gen(function* () {
   const installPersonalization = Effect.fn("DevboxService.installPersonalization")(function* (
     name: string,
   ) {
-    const skill = yield* readPersonalFile(".agents/skills/council/SKILL.md");
-    if (skill === null || skill.trim().length === 0) return;
+    const { council, dig, digPolicy } = yield* Effect.all({
+      council: readPersonalFile(".agents/skills/council/SKILL.md"),
+      dig: readPersonalFile(".agents/skills/dig/SKILL.md"),
+      digPolicy: readPersonalFile(".agents/skills/dig/agents/openai.yaml"),
+    });
+    const skills = {
+      ...(council?.trim() ? { council: { "SKILL.md": council } } : {}),
+      ...(dig?.trim() && digPolicy?.trim()
+        ? { dig: { "agents/openai.yaml": digPolicy, "SKILL.md": dig } }
+        : {}),
+    };
+    if (Object.keys(skills).length === 0) return;
     const instructions = yield* Effect.all({
       codexInstructions: readPersonalFile(".codex/AGENTS.md"),
       claudeInstructions: readPersonalFile(".claude/CLAUDE.md"),
     });
-    const body = yield* encodeJson({ skill, ...instructions }).pipe(
+    const body = yield* encodeJson({ skills, ...instructions }).pipe(
       Effect.mapError(devboxError("provision")),
     );
     yield* ssh(name, `python3 -c ${shellQuote(INSTALL_PERSONALIZATION_SCRIPT)}`, body, "1 minute");
