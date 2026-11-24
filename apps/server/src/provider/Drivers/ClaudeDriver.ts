@@ -1,4 +1,4 @@
-import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { ClaudeSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import type * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
@@ -6,11 +6,13 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -59,6 +61,7 @@ import {
   type ProviderSnapshotSettings,
 } from "@t3tools/provider-core/server/snapshotSettings";
 import {
+  claudeSignedOutMessage,
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   mergeClaudeProcessEnvironment,
@@ -142,11 +145,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     );
     const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig, processEnv);
     const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
-    const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
+    const explicitConfigDir =
       effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim()
         ? configDir
-        : undefined,
-    );
+        : undefined;
+    const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(explicitConfigDir);
     const stampIdentity = withInstanceIdentity({
       instanceId,
       driverKind: DRIVER_KIND,
@@ -156,6 +159,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     });
 
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
+    const expiredLogin = yield* SubscriptionRef.make<number | null>(null);
+    const confirmLogin = (verifiedAt: number) =>
+      SubscriptionRef.modifySome(expiredLogin, (expiry) => [
+        undefined,
+        expiry !== null && verifiedAt > expiry ? Option.some(null) : Option.none(),
+      ]);
     // The SDK's user source is the host's home, not a custom one; same rule as the adapter.
     const customHome =
       effectiveConfig.homePath.trim().length > 0 ||
@@ -188,6 +197,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       {
         scopedLimitNames,
         onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+        onLoginStatus: (status, at) =>
+          status === "expired" ? SubscriptionRef.set(expiredLogin, at) : confirmLogin(at),
         onSessionInit: (cwd) => Queue.offer(workspaceRescans, cwd).pipe(Effect.asVoid),
         modelCatalog,
         routeModelCatalog: modelRoutes.route,
@@ -269,8 +280,21 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       stateDir,
       processEnv,
     );
-    const resolveCapabilities = Cache.get(capabilitiesProbeCache, capabilitiesCacheKey).pipe(
-      Effect.map((result) => result.capabilities),
+    const resolveCapabilities = Effect.fn("ClaudeDriver.resolveCapabilities")(
+      function* () {
+        const expiry = yield* SubscriptionRef.get(expiredLogin);
+        if (expiry !== null && !processEnv.CLAUDE_CODE_OAUTH_TOKEN) {
+          // Claude can serve usage from disk. A newly fetched OAuth profile is evidence of sign-in.
+          const account = yield* ClaudeResetCredits.readClaudeOauthAccount(accountConfigPath);
+          if (typeof account?.profileFetchedAt === "number" && account.profileFetchedAt > expiry) {
+            yield* Cache.invalidateAll(capabilitiesProbeCache);
+            yield* confirmLogin(account.profileFetchedAt);
+          }
+        }
+        const { capabilities } = yield* Cache.get(capabilitiesProbeCache, capabilitiesCacheKey);
+        return capabilities;
+      },
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
     );
 
     const checkProvider = catalogService.refreshInBackground.pipe(
@@ -279,7 +303,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           Effect.flatMap((catalog) =>
             checkClaudeProviderStatus(
               effectiveConfig,
-              () => resolveCapabilities,
+              resolveCapabilities,
               processEnv,
               stateDir,
               catalog,
@@ -308,7 +332,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     );
 
     const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
-    const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<ClaudeSettings>>({
+    const managedSnapshot = yield* makeManagedServerProvider<
+      ProviderSnapshotSettings<ClaudeSettings>
+    >({
       resolveMaintenance,
       getSettings: snapshotSettings.getSettings,
       streamSettings: snapshotSettings.streamSettings,
@@ -349,6 +375,48 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           }),
       ),
     );
+
+    // Startup metadata can survive expiry. Keep that probe from undoing a CLI rejection.
+    const applyLoginStatus = (provider: ServerProvider) =>
+      SubscriptionRef.get(expiredLogin).pipe(
+        Effect.map((expiry): ServerProvider => {
+          if (
+            expiry === null ||
+            !provider.enabled ||
+            !provider.installed ||
+            provider.auth.status === "unauthenticated" ||
+            provider.auth.type === "apiKey" ||
+            provider.auth.type === "customEndpoint" ||
+            provider.auth.type === "bedrock"
+          ) {
+            return provider;
+          }
+          const { usageLimits: _expiredUsage, ...rest } = provider;
+          return {
+            ...rest,
+            status: "error",
+            auth: { status: "unauthenticated" },
+            message: claudeSignedOutMessage({
+              configDir: explicitConfigDir,
+              cwd: stateDir,
+            }),
+          };
+        }),
+      );
+    const getSnapshot = managedSnapshot.getSnapshot.pipe(Effect.flatMap(applyLoginStatus));
+    const snapshot = {
+      ...managedSnapshot,
+      getSnapshot,
+      refresh: managedSnapshot.refresh.pipe(Effect.flatMap(applyLoginStatus)),
+      streamChanges: Stream.merge(
+        managedSnapshot.streamChanges,
+        SubscriptionRef.changes(expiredLogin).pipe(
+          Stream.map((expiry) => expiry !== null),
+          Stream.changes,
+          Stream.drop(1),
+        ),
+      ).pipe(Stream.mapEffect(() => getSnapshot)),
+    };
 
     // Same rules as Codex: serialised on the config directory that holds the
     // login, one request id kept until Claude answers (a cooldown or rate

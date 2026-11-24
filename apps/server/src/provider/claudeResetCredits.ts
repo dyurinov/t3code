@@ -26,6 +26,7 @@ const Config = Schema.Struct({
     Schema.Struct({
       organizationUuid: Schema.optional(Schema.String),
       accountUuid: Schema.optional(Schema.Unknown),
+      profileFetchedAt: Schema.optional(Schema.Unknown),
     }),
   ),
 });

@@ -5978,6 +5978,7 @@ export interface ClaudeAdapterV2Options {
   readonly queryRunner: ClaudeAgentSdkQueryRunnerShape;
   readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
   readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
+  readonly onLoginStatus?: (status: "expired" | "verified", at: number) => Effect.Effect<void>;
   /**
    * Called with the requested cwd on a process's first init message, after its synchronous
    * SessionStart hooks have run, so cwd-keyed workspace scans can be refreshed.
@@ -12544,7 +12545,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             if (!isClaudeProviderContinuationTurn(context.input)) {
               yield* markAbsorbedWake(liveQuery.nativeThreadId);
             }
+            const loginExpired =
+              message.subtype === "success" &&
+              message.is_error &&
+              message.terminal_reason === "api_error" &&
+              message.result.startsWith("Login expired · Run /login");
             const usageLimited =
+              !loginExpired &&
               context.authenticationFailureMessage === undefined &&
               (context.rejectedRateLimitTypes.size > 0 ||
                 context.latestAssistantRateLimit !== null) &&
@@ -12575,12 +12582,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               endpointHost === undefined
                 ? undefined
                 : `The custom API endpoint ${endpointHost} reported Claude Code ${rewrittenVersion}, but this session runs Claude Code ${liveQuery.claudeCodeVersion}. Running claude update will not fix this; the endpoint or a proxy behind it rewrote the version.`;
-            const failureHint = permissionDenied
-              ? message.result
-              : (context.authenticationFailureMessage ??
-                (usageLimited
-                  ? "Claude usage limit reached. Send the message again once the limit resets."
-                  : rewrittenVersionError));
+            const failureHint =
+              permissionDenied || loginExpired
+                ? message.result
+                : (context.authenticationFailureMessage ??
+                  (usageLimited
+                    ? "Claude usage limit reached. Send the message again once the limit resets."
+                    : rewrittenVersionError));
             // Usage-limited /compact reports success; fail it so queued messages wait for the limit to clear.
             const limitedCompaction =
               usageLimited && message.subtype === "success" && message.local_command === "compact"
@@ -12631,6 +12639,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               : limitedCompaction !== null
                 ? "failed"
                 : terminalStatusFromResult(message, failureHint);
+            if (adapterOptions.onLoginStatus) {
+              if (!interrupted && loginExpired) {
+                yield* adapterOptions.onLoginStatus("expired", DateTime.toEpochMillis(completedAt));
+              } else if (
+                status === "completed" &&
+                terminalFailure === null &&
+                context.rootModels.size > 0
+              ) {
+                yield* adapterOptions.onLoginStatus(
+                  "verified",
+                  DateTime.toEpochMillis(context.startedAt),
+                );
+              }
+            }
             // Claude answers a steer it has not read yet as the next native turn, which echoes
             // the steer. A result without echoes cannot prove that turn will come.
             if (
@@ -15555,7 +15577,12 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
     input: ProviderAdapterDriverCreateInput<ClaudeSettings>,
     hooks: Pick<
       ClaudeAdapterV2Options,
-      "scopedLimitNames" | "onUsageLimits" | "onSessionInit" | "modelCatalog" | "routeModelCatalog"
+      | "scopedLimitNames"
+      | "onUsageLimits"
+      | "onLoginStatus"
+      | "onSessionInit"
+      | "modelCatalog"
+      | "routeModelCatalog"
     > = {},
   ) {
     const { instanceId, environment, enabled, config } = input;

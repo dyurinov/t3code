@@ -3865,6 +3865,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       Partial<Pick<ClaudeAdapterV2.ClaudeAgentSdkQuerySession, "listPermissionRules">>;
     readonly environment?: NodeJS.ProcessEnv;
     readonly onSessionInit?: (cwd: string) => Effect.Effect<void>;
+    readonly onLoginStatus?: ClaudeAdapterV2.ClaudeAdapterV2Options["onLoginStatus"];
     readonly subagentLaunchToolUseId?: string;
     readonly subagentModel?: string;
     readonly nativeSessionId?: string;
@@ -3941,6 +3942,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         random: yield* SecureRandom.SecureRandom,
         idAllocator,
         ...(options?.onSessionInit ? { onSessionInit: options.onSessionInit } : {}),
+        ...(options?.onLoginStatus ? { onLoginStatus: options.onLoginStatus } : {}),
         ...(options?.routeModelCatalog ? { routeModelCatalog: options.routeModelCatalog } : {}),
         continuationRequests: {
           offer: (request) =>
@@ -9487,6 +9489,54 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.include(terminal.failure.message, configDir);
       assert.include(terminal.failure.message, JSON.stringify(cwd));
       assert.notInclude(terminal.failure.message, "repeated API errors");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("reports Claude's expired login even when it is labeled invalid_request", () =>
+    Effect.gen(function* () {
+      const loginStatus = yield* Ref.make<"expired" | "verified" | null>(null);
+      const harness = yield* makeWakeHarnessWithOptions({
+        onLoginStatus: (status) => Ref.set(loginStatus, status),
+      });
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-claude-login-expired"),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      const cliText =
+        "Login expired · Run /login to sign in again, or re-authenticate your Anthropic profile";
+      yield* Queue.offerAll(harness.sdkMessages, [
+        makeAssistantErrorFrame({
+          uuid: "00000000-0000-4000-8000-000000000610",
+          error: "invalid_request",
+          text: cliText,
+        }),
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000611",
+          result: cliText,
+          isError: true,
+          terminalReason: "api_error",
+        }),
+      ]);
+
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "failed");
+      assert.equal(yield* Ref.get(loginStatus), "expired");
+      if (terminal.status === "failed") assert.equal(terminal.failure.message, cliText);
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

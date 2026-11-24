@@ -35,12 +35,14 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ClaudeAdapterV2 from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
 import * as ModelManifest from "./ModelManifest.ts";
@@ -57,6 +59,7 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 import type { AnyProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
+vi.mock("../orchestration-v2/Adapters/ClaudeAdapterV2.ts", { spy: true });
 
 const layerTestHttpClient = Layer.succeed(
   HttpClient.HttpClient,
@@ -897,6 +900,68 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
         }).pipe(Effect.provide(layerTest)),
     );
   }
+
+  it.effect.skipIf(windowsHost)("keeps Claude signed out until its account is verified again", () =>
+    Effect.gen(function* () {
+      const fixtures = yield* makeTildeProviderFixtures();
+      const instanceId = ProviderInstanceId.make("claude_expired_login");
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [ClaudeDriver],
+        configMap: {
+          [instanceId]: {
+            driver: ClaudeDriver.driverKind,
+            enabled: true,
+            config: makeClaudeConfig({
+              enabled: true,
+              binaryPath: fixtures.claudeBinaryPath,
+              homePath: fixtures.claudeHomePath,
+            }),
+          },
+        },
+      });
+      const instance = yield* registry.getInstance(instanceId);
+      if (!instance) throw new Error("Missing Claude instance");
+      const hook = vi
+        .mocked(ClaudeAdapterV2.createClaudeAdapterV2)
+        .mock.calls.findLast(([input]) => input.instanceId === instanceId)?.[1]?.onLoginStatus;
+      if (!hook) throw new Error("Missing Claude login status hook");
+
+      const before = yield* instance.snapshot.refresh;
+      expect(before.auth.status).toBe("authenticated");
+      expect(before.usageLimits?.windows).toHaveLength(1);
+      const published = yield* instance.snapshot.streamChanges.pipe(
+        Stream.filter((provider) => provider.auth.status === "unauthenticated"),
+        Stream.runHead,
+        Effect.forkScoped,
+      );
+      yield* TestClock.adjust(0);
+      const expiredAt = DateTime.toEpochMillis(yield* DateTime.now);
+      yield* hook("expired", expiredAt);
+      expect(yield* Fiber.join(published)).toMatchObject({
+        _tag: "Some",
+        value: { auth: { status: "unauthenticated" }, status: "error" },
+      });
+      const stale = yield* instance.snapshot.refresh;
+      expect(stale.auth.status).toBe("unauthenticated");
+      expect(stale.usageLimits).toBeUndefined();
+
+      yield* TestClock.adjust("1 millis");
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const profileFetchedAt = DateTime.toEpochMillis(yield* DateTime.now);
+      yield* fs.writeFileString(
+        path.join(fixtures.claudeHomePath, ".claude.json"),
+        JSON.stringify({ oauthAccount: { profileFetchedAt } }),
+      );
+      expect((yield* instance.snapshot.refresh).auth.status).toBe("authenticated");
+
+      yield* hook("expired", profileFetchedAt + 1);
+      yield* hook("verified", profileFetchedAt);
+      expect((yield* instance.snapshot.getSnapshot).auth.status).toBe("unauthenticated");
+      yield* hook("verified", profileFetchedAt + 2);
+      expect((yield* instance.snapshot.getSnapshot).auth.status).toBe("authenticated");
+    }).pipe(Effect.provide(layerTest)),
+  );
 
   it.effect(
     "shadows instances whose driver is not registered in this build without failing boot",
