@@ -9,6 +9,7 @@ import * as NodeOS from "node:os";
 import {
   DevboxError,
   EnvironmentId as EnvironmentIdSchema,
+  ProviderInstanceId,
   type DeletedDevbox,
   type DevboxClientPairing,
   type DevboxCreateInput,
@@ -20,6 +21,7 @@ import {
   type DevboxUsageInput,
   type DevboxUsageResult,
   type EnvironmentId,
+  type ServerSettings,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -42,11 +44,14 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettingsService from "../serverSettings.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
@@ -214,6 +219,7 @@ export class DevboxService extends Context.Service<
 
 const PORT_BASE = 13800;
 const HOST_LINK_ACCESS = "auto";
+const CURSOR_INSTANCE_ID = ProviderInstanceId.make("cursor");
 const KEEP_ALIVE_INTERVAL = Duration.minutes(10);
 const LOGIN_SYNC_INTERVAL = Duration.minutes(10);
 const KEEP_ALIVE_EXTENSION = "1h";
@@ -233,6 +239,8 @@ export const make = Effect.gen(function* () {
   const peerLinks = yield* PeerLinks.PeerLinks;
   const auth = yield* EnvironmentAuth.EnvironmentAuth;
   const logins = yield* DevboxLogins.DevboxLogins;
+  const settings = yield* ServerSettingsService.ServerSettingsService;
+  const secrets = yield* SecretResolver.SecretResolver;
   const httpClient = yield* HttpClient.HttpClient;
   const net = yield* NetService.NetService;
 
@@ -269,6 +277,7 @@ export const make = Effect.gen(function* () {
   });
   // The access tokens each box last got, so the sync only writes to boxes that are behind.
   const pushed = new Map<string, string>();
+  const pushedCursorKeys = new Map<string, string>();
   // The last renewal outcomes, so a box left with no usable token says why: the provider
   // refused the sign-in (user signs in again), or the box has no Formal (user binds it).
   const refused = new Set<DevboxLoginProvider>();
@@ -1101,7 +1110,7 @@ export const make = Effect.gen(function* () {
 
   // Every box uses this machine's Cursor sign-in: Cursor keys are per account, not per machine.
   const cursorCredentials = yield* ProviderCredentialStore.make("cursor", "cursor");
-  const cursorApiKey = cursorCredentials.get.pipe(
+  const browserCursorApiKey = cursorCredentials.get.pipe(
     Effect.flatMap(
       Option.match({
         onNone: () => Effect.succeedNone,
@@ -1120,11 +1129,70 @@ export const make = Effect.gen(function* () {
       ),
     ),
   );
-  const installCursor = Effect.fn("DevboxService.installCursor")(function* (name: string) {
-    const key = yield* cursorApiKey.pipe(Effect.orElseSucceed(() => Option.none<string>()));
-    if (Option.isNone(key)) return;
-    yield* ssh(name, `python3 -c ${shellQuote(INSTALL_CURSOR_SCRIPT)}`, key.value, "1 minute");
+  const inheritedCursorApiKey = yield* Config.String("CURSOR_API_KEY").pipe(
+    Config.option,
+    Effect.map(Option.getOrUndefined),
+  );
+  const cursorSetting = (snapshot: ServerSettings) =>
+    snapshot.providerInstances[CURSOR_INSTANCE_ID]?.environment?.findLast(
+      ({ name }) => name === "CURSOR_API_KEY",
+    )?.value;
+  const readCursorApiKey = Effect.fn("DevboxService.readCursorApiKey")(function* () {
+    const configured = cursorSetting(yield* settings.getSettings);
+    if (configured !== undefined && typeof configured !== "string") {
+      const [key] = yield* secrets.read([configured]);
+      return key?.trim() || undefined;
+    }
+    const key = (configured ?? inheritedCursorApiKey)?.trim();
+    return key || Option.getOrUndefined(yield* browserCursorApiKey);
   });
+  const installCursor = Effect.fn("DevboxService.installCursor")(
+    function* (name: string) {
+      // Read under the box lock so a delayed push cannot overwrite a newer key.
+      const key = yield* readCursorApiKey();
+      if (!key || pushedCursorKeys.get(name) === key) return;
+      pushedCursorKeys.delete(name);
+      yield* ssh(name, `python3 -c ${shellQuote(INSTALL_CURSOR_SCRIPT)}`, key, "1 minute");
+      pushedCursorKeys.set(name, key);
+    },
+    (effect, name) =>
+      effect.pipe(
+        Effect.catch(() => Effect.logWarning("devbox Cursor key could not be synced", { name })),
+      ),
+  );
+  const syncCursor = Effect.fn("DevboxService.syncCursor")(
+    function* (all: ReadonlyMap<string, CoderWorkspace> | undefined) {
+      const key = yield* readCursorApiKey();
+      if (!key) return;
+      const inventory = all ?? (yield* workspaces);
+      const held = new Set(yield* locks.activeKeys);
+      const running = [...(yield* Ref.get(records)).values()].filter(
+        ({ name }) =>
+          inventory.get(name)?.latest_build.status === "running" &&
+          pushedCursorKeys.get(name) !== key &&
+          !held.has(name),
+      );
+      yield* Effect.forEach(
+        running,
+        ({ name }) =>
+          locks.withLock(
+            name,
+            Effect.gen(function* () {
+              const state = (yield* Ref.get(transient)).get(name)?.state;
+              if (
+                (yield* Ref.get(records)).has(name) &&
+                state !== "stopping" &&
+                state !== "deleting"
+              )
+                yield* installCursor(name);
+            }),
+          ),
+        { concurrency: 4, discard: true },
+      );
+    },
+    (effect, _all) =>
+      effect.pipe(Effect.catch(() => Effect.logWarning("devbox Cursor key sync failed"))),
+  );
 
   /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
   const connect = Effect.fn("DevboxService.connect")(
@@ -1132,6 +1200,7 @@ export const make = Effect.gen(function* () {
       // The startup script (codez refresh, full redeploy) can run for over 30 minutes; agents
       // only need ssh and the checkout, so connect as soon as the box's agent answers.
       yield* coder(["ssh", "--wait=no", stored.name, "--", "true"], "10 minutes");
+      yield* installCursor(stored.name);
       yield* installPersonalization(stored.name);
       // This box can renew a due sign-in itself, so a waking box gets a fresh token at once.
       // A renewal here changes every box's token; the others get it in the background.
@@ -1172,16 +1241,6 @@ export const make = Effect.gen(function* () {
     (effect, stored) =>
       effect.pipe(
         Effect.tap(() => setTransient(stored.name, undefined)),
-        Effect.tap(() =>
-          FiberSet.run(
-            background,
-            installCursor(stored.name).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("devbox Cursor sign-in failed", { name: stored.name, cause }),
-              ),
-            ),
-          ),
-        ),
         Effect.tap(() =>
           FiberSet.run(
             background,
@@ -1348,7 +1407,8 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* setTransient(name, { state: "starting", lastError: null });
         const workspace = (yield* workspaces).get(name);
-        if (workspace?.latest_build.status !== "running")
+        if (workspace?.latest_build.status !== "running") {
+          pushedCursorKeys.delete(name);
           // An autoupdating box moves to the template's latest version, which requires the
           // marker z devbox create sends; a default is ignored by templates without it, and
           // is only used rather than prompted for with --use-parameter-defaults.
@@ -1363,6 +1423,7 @@ export const make = Effect.gen(function* () {
             ],
             "15 minutes",
           );
+        }
         yield* connect(record);
       }).pipe(
         Effect.tapError((error) =>
@@ -1442,6 +1503,7 @@ export const make = Effect.gen(function* () {
             yield* coder(["delete", name, "--yes"], "15 minutes");
           }
           pushed.delete(name);
+          pushedCursorKeys.delete(name);
           unboundBoxes.delete(name);
           bindAttempts.delete(name);
           yield* Ref.update(records, (current) => {
@@ -1779,6 +1841,7 @@ export const make = Effect.gen(function* () {
   yield* Ref.set(history, stored.history ?? []);
   const reconnect = Effect.gen(function* () {
     const all = yield* workspaces;
+    yield* syncCursor(all);
     const ordered = [...(yield* Ref.get(records)).values()].toSorted(
       (a, b) => Number(b.spare === true) - Number(a.spare === true),
     );
@@ -1833,6 +1896,7 @@ export const make = Effect.gen(function* () {
       yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
     yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
     pushed.delete(name);
+    pushedCursorKeys.delete(name);
     unboundBoxes.delete(name);
     bindAttempts.delete(name);
     const now = yield* Clock.currentTimeMillis;
@@ -1879,6 +1943,7 @@ export const make = Effect.gen(function* () {
     // Only a list Coder answered counts; a failed `coder list` fails this pass instead.
     const all = yield* workspaces;
     yield* reconcileWithCoder(all);
+    yield* syncCursor(all);
     for (const record of (yield* Ref.get(records)).values()) {
       if (all.get(record.name)?.latest_build.status !== "running") continue;
       if (yield* FiberMap.has(creations, record.name)) continue;
@@ -1900,6 +1965,13 @@ export const make = Effect.gen(function* () {
       );
     }
   }).pipe(Effect.catchCause((cause) => Effect.logWarning("devbox heal failed", { cause })));
+  const settingsChanges = yield* settings.subscribeChanges;
+  yield* settingsChanges.pipe(
+    Stream.map(cursorSetting),
+    Stream.changes,
+    Stream.runForEach(() => syncCursor(undefined)),
+    Effect.forkScoped,
+  );
   yield* forkParked(Effect.sleep(Duration.minutes(2)).pipe(Effect.andThen(heal), Effect.forever));
   // An idle tick is one `coder list`; a box that just got Formal gets its token within minutes.
   yield* forkParked(

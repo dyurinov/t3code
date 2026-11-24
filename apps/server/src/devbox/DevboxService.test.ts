@@ -1,4 +1,10 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerSettings,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Digest from "effect/crypto/Digest";
@@ -10,10 +16,12 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as HttpClient from "effect/http/HttpClient";
 
 import * as NetService from "@t3tools/shared/Net";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -21,8 +29,11 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { ServerActivation } from "../serverActivation.ts";
+import * as ServerSettingsService from "../serverSettings.ts";
 import * as DevboxLogins from "./DevboxLogins.ts";
 import * as DevboxService from "./DevboxService.ts";
+
+const CURSOR_INSTANCE_ID = ProviderInstanceId.make("cursor");
 
 const spare = (name: string, installed = true, linked = true) => ({
   name,
@@ -57,6 +68,12 @@ const setup = Effect.fn("test.setup")(function* (
   let generation = 0;
   const binds = yield* Queue.unbounded<string>();
   const pushes = yield* Queue.unbounded<string>();
+  const cursorPushes = yield* Queue.unbounded<{ box: string; key: string }>();
+  const settingsChanges = yield* Queue.unbounded<ServerSettings>();
+  let currentSettings = DEFAULT_SERVER_SETTINGS;
+  const workspaceStates = new Map<string, "running" | "stopped">(
+    stored.map(({ name }) => [name, "running"]),
+  );
   const relayed = yield* Queue.unbounded<string>();
   const renewalDone = yield* Deferred.make<void>();
   const rejectedTokens: Array<string> = [];
@@ -97,6 +114,11 @@ const setup = Effect.fn("test.setup")(function* (
         Layer.mock(ServerEnvironment.ServerEnvironment)({}),
         Layer.mock(PeerLinks.PeerLinks)({}),
         Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+        Layer.mock(SecretResolver.SecretResolver)({}),
+        Layer.mock(ServerSettingsService.ServerSettingsService)({
+          getSettings: Effect.sync(() => currentSettings),
+          subscribeChanges: Effect.succeed(Stream.fromQueue(settingsChanges)),
+        }),
         Layer.mock(ServerSecretStore.ServerSecretStore)({
           get: () => Effect.succeedNone,
         }),
@@ -168,8 +190,47 @@ const setup = Effect.fn("test.setup")(function* (
                 yield* Queue.offer(reads, undefined);
                 return {
                   stdout: JSON.stringify(
-                    stored.map(({ name }) => ({ name, latest_build: { status: "running" } })),
+                    [...workspaceStates].map(([name, status]) => ({
+                      name,
+                      latest_build: { status },
+                    })),
                   ),
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }
+              if (input.command === "coder" && input.args[0] === "start") {
+                workspaceStates.set(input.args[1]!, "running");
+              }
+              if (
+                (input.command === "coder" && input.args[0] === "start") ||
+                (input.command === "coder" &&
+                  input.args[0] === "ssh" &&
+                  currentSettings.providerInstances[CURSOR_INSTANCE_ID]?.enabled === true)
+              ) {
+                return {
+                  stdout: "",
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }
+              if (input.command === "ssh" && input.args.at(-1)?.includes("CURSOR_API_KEY")) {
+                yield* Queue.offer(cursorPushes, {
+                  box: input.args.find((arg) => arg.startsWith("coder."))!.slice(6),
+                  key: typeof input.stdin === "string" ? input.stdin : "",
+                });
+                return {
+                  stdout: "installed",
                   stderr: "",
                   code: ChildProcessSpawner.ExitCode(0),
                   timedOut: false,
@@ -252,7 +313,45 @@ const setup = Effect.fn("test.setup")(function* (
     rejectedTokens,
     pushes,
     binds,
+    cursorPushes,
+    sleepBox: (box: string) =>
+      Effect.sync(() => {
+        workspaceStates.set(box, "stopped");
+      }),
+    rotateCursorKey: (key: string) =>
+      Effect.suspend(() => {
+        currentSettings = {
+          ...currentSettings,
+          providerInstances: {
+            ...currentSettings.providerInstances,
+            [CURSOR_INSTANCE_ID]: {
+              driver: ProviderDriverKind.make("cursor"),
+              enabled: true,
+              environment: [{ name: "CURSOR_API_KEY", sensitive: true, value: key }],
+            },
+          },
+        };
+        return Queue.offer(settingsChanges, currentSettings);
+      }),
   };
+});
+
+describe("devbox Cursor keys", () => {
+  it.effect("pushes the configured key to running boxes and the latest key on wake", () =>
+    Effect.gen(function* () {
+      const { service, sleepBox, rotateCursorKey, cursorPushes } = yield* setup([
+        spare("01-awake"),
+        spare("02-asleep"),
+      ]);
+      yield* sleepBox("02-asleep");
+      yield* rotateCursorKey("first-key");
+      expect(yield* Queue.take(cursorPushes)).toEqual({ box: "01-awake", key: "first-key" });
+      yield* rotateCursorKey("new-key");
+      expect(yield* Queue.take(cursorPushes)).toEqual({ box: "01-awake", key: "new-key" });
+      yield* service.wake("02-asleep");
+      expect(yield* Queue.take(cursorPushes)).toEqual({ box: "02-asleep", key: "new-key" });
+    }),
+  );
 });
 
 describe("devbox allocation", () => {

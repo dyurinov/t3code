@@ -476,7 +476,7 @@ except (urllib.error.URLError, OSError, ValueError):
  * Reads a Cursor API key on stdin and turns on the box's Cursor provider with it. T3 watches
  * settings.json, so this takes effect without a restart; an unchanged key writes nothing.
  */
-export const INSTALL_CURSOR_SCRIPT = String.raw`import json, os, sys
+export const INSTALL_CURSOR_SCRIPT = String.raw`import json, os, sys, tempfile
 key = sys.stdin.read().strip()
 path = os.path.expanduser("~/.t3/userdata/settings.json")
 os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -493,10 +493,9 @@ wanted = {
 }
 if wanted != current:
     instances["cursor"] = wanted
-    os.umask(0o077)
-    with open(path + ".tmp", "w") as f:
+    with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path), delete=False) as f:
         json.dump(settings, f, indent=2)
-    os.replace(path + ".tmp", path)
+    os.replace(f.name, path)
     print("installed")
 else:
     print("unchanged")
