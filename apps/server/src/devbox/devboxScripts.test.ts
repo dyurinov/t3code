@@ -18,6 +18,7 @@ import {
   slugifyDevboxName,
   uniqueDevboxName,
   INSTALL_T3_SCRIPT,
+  PROVISION_SCRIPT,
   INSTALL_PERSONALIZATION_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
   REFRESH_LOGIN_SCRIPT,
@@ -342,6 +343,15 @@ describe("T3 release installation", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("https://catalog.formal.ai/catalog/resource/resource_fixture");
     expect(result.stderr).not.toContain("Traceback");
+  });
+
+  it("bounds every curl call in PROVISION_SCRIPT with connect and max-time timeouts", () => {
+    const curlLines = PROVISION_SCRIPT.split("\n").filter((line) => /\bcurl\b/u.test(line));
+    expect(curlLines.length).toBeGreaterThanOrEqual(2);
+    for (const line of curlLines) {
+      expect(line).toContain("--connect-timeout");
+      expect(line).toContain("--max-time");
+    }
   });
 });
 

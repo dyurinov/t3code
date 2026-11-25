@@ -255,7 +255,7 @@ systemctl --user daemon-reload
 systemctl --user enable t3code.service >/dev/null 2>&1
 if [ "$changed" = 1 ]; then systemctl --user restart t3code.service; else systemctl --user start t3code.service; fi
 for _ in $(seq 1 90); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:${REMOTE_T3_PORT}/.well-known/t3/environment" 2>/dev/null; then
+  if curl -fsS --connect-timeout 2 --max-time 5 -o /dev/null "http://127.0.0.1:${REMOTE_T3_PORT}/.well-known/t3/environment" 2>/dev/null; then
     # One task per box, in the box's own codez checkout. Adding it again is refused; that is fine.
     [ -d "$CODEZ_DIR" ] && "$dir/t3" project add --base-dir "$HOME/.t3" --title codez "$CODEZ_DIR" >/dev/null 2>&1 || true
     echo ready
