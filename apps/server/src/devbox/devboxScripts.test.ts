@@ -4,7 +4,10 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import { AuthProvidersManageScope, WS_METHODS } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+
+import { requiredScopeForRpcMethod } from "../auth/RpcAuthorization.ts";
 
 import {
   devboxSpans,
@@ -21,6 +24,8 @@ import {
   isCurrentProvisionRevision,
   PROVISION_REVISION,
   PROVISION_SCRIPT,
+  PREPARE_ANTIGRAVITY_SCRIPT,
+  SETTINGS_TOKEN_SCRIPT,
   INSTALL_PERSONALIZATION_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
   REFRESH_LOGIN_SCRIPT,
@@ -229,6 +234,136 @@ describe("devbox personal instructions", () => {
     expect(NodeFS.readFileSync(NodePath.join(home, ".claude/CLAUDE.md"), "utf8")).toContain(
       payload.claudeInstructions.trim(),
     );
+  });
+});
+
+describe("devbox Antigravity preparation", () => {
+  it("issues the exact RPC scopes required to read settings and manage provider instances", () => {
+    const granted = [...SETTINGS_TOKEN_SCRIPT.matchAll(/--scope\s+(\S+)/g)].map((m) => m[1]);
+    expect(granted).toContain(requiredScopeForRpcMethod(WS_METHODS.serverGetSettings));
+    expect(granted).toContain(AuthProvidersManageScope);
+  });
+
+  it("verifies broker project and brokerId, downloads and SHA-512-verifies agy on clean install, and rejects mismatches", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-agy-prepare-"));
+    using _cleanup = {
+      [Symbol.dispose]: () => NodeFS.rmSync(home, { recursive: true, force: true }),
+    };
+    const payloadDir = NodePath.join(home, "archive-src");
+    NodeFS.mkdirSync(payloadDir, { recursive: true });
+    const fakeAgyScript = "#!/bin/sh\necho fake-agy\n";
+    NodeFS.writeFileSync(NodePath.join(payloadDir, "antigravity"), fakeAgyScript, { mode: 0o755 });
+    const archivePath = NodePath.join(home, "cli_linux_x64.tar.gz");
+    NodeChildProcess.execFileSync("tar", ["-czf", archivePath, "-C", payloadDir, "antigravity"]);
+    const archiveBytes = NodeFS.readFileSync(archivePath);
+    const validSha512 = NodeCrypto.createHash("sha512").update(archiveBytes).digest("hex");
+
+    const runWithFixture = (opts: {
+      brokerProject: string;
+      expectedProject: string;
+      actualBrokerId?: string;
+      expectedBrokerId?: string;
+      sha512?: string;
+      downloadUrl?: string;
+    }) => {
+      const harness = `
+import io, json, platform, time, urllib.request
+platform.machine = lambda: "x86_64"
+time.sleep = lambda _: None
+archive = open(${JSON.stringify(archivePath)}, "rb").read()
+manifest = json.dumps({
+    "version": "1.5.17",
+    "url": ${JSON.stringify(opts.downloadUrl ?? "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-1/linux-x64/cli_linux_x64.tar.gz")},
+    "sha512": ${JSON.stringify(opts.sha512 ?? validSha512)},
+}).encode()
+class FakeResp(io.BytesIO):
+    def __init__(self, data, headers=None, status=200):
+        super().__init__(data)
+        self.headers = headers or {}
+        self.status = status
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+def fake_urlopen(req, timeout=30):
+    url = req.full_url if hasattr(req, "full_url") else str(req)
+    if url.endswith("/computeMetadata/v1/project/project-id"):
+        assert req.headers.get("Metadata-flavor") == "Google"
+        return FakeResp(${JSON.stringify(opts.brokerProject)}.encode(), {"Metadata-Flavor": "Google"})
+    if url.endswith("/computeMetadata/v1/instance/attributes/t3-broker-id"):
+        assert req.headers.get("Metadata-flavor") == "Google"
+        return FakeResp(${JSON.stringify(opts.actualBrokerId ?? "broker-123")}.encode(), {"Metadata-Flavor": "Google"})
+    if url.endswith("/manifests/linux_amd64.json"):
+        return FakeResp(manifest)
+    if url.startswith("https://storage.googleapis.com/antigravity-public/antigravity-cli/"):
+        return FakeResp(archive)
+    raise AssertionError(f"unexpected url: {url}")
+class FakeOpener:
+    def open(self, req, timeout=30):
+        return fake_urlopen(req, timeout=timeout)
+def fake_build_opener(*handlers):
+    assert any(isinstance(h, urllib.request.ProxyHandler) and h.proxies == {} for h in handlers)
+    return FakeOpener()
+urllib.request.build_opener = fake_build_opener
+urllib.request.urlopen = fake_urlopen
+exec(compile(${JSON.stringify(PREPARE_ANTIGRAVITY_SCRIPT)}, "prepare_agy.py", "exec"))
+`;
+      return NodeChildProcess.spawnSync("python3", ["-c", harness], {
+        input: JSON.stringify({
+          gcpProject: opts.expectedProject,
+          metadataHost: "127.0.0.1:13798",
+          brokerId: opts.expectedBrokerId ?? "broker-123",
+        }),
+        encoding: "utf8",
+        env: { ...process.env, HOME: home },
+      });
+    };
+
+    // Rejects SHA-512 checksum mismatch before touching ~/.local/bin/agy.
+    const badHash = runWithFixture({
+      brokerProject: "demo-proj",
+      expectedProject: "demo-proj",
+      sha512: "0".repeat(128),
+    });
+    expect(badHash.status).not.toBe(0);
+    expect(badHash.stderr).toContain("SHA-512 checksum mismatch");
+    expect(NodeFS.existsSync(NodePath.join(home, ".local/bin/agy"))).toBe(false);
+
+    // Rejects untrusted download URL outside Google's bucket prefix.
+    const badUrl = runWithFixture({
+      brokerProject: "demo-proj",
+      expectedProject: "demo-proj",
+      downloadUrl: "https://evil.example/cli_linux_x64.tar.gz",
+    });
+    expect(badUrl.status).not.toBe(0);
+    expect(badUrl.stderr).toContain("Unexpected Antigravity download URL");
+
+    // Rejects when another host's broker owns port 13798 even for the same GCP project.
+    const wrongBroker = runWithFixture({
+      brokerProject: "demo-proj",
+      expectedProject: "demo-proj",
+      actualBrokerId: "other-host-broker",
+      expectedBrokerId: "broker-123",
+    });
+    expect(wrongBroker.status).not.toBe(0);
+    expect(wrongBroker.stderr).toContain("Vertex metadata broker");
+
+    // Clean install succeeds and writes executable ~/.local/bin/agy.
+    const ok = runWithFixture({
+      brokerProject: "demo-proj",
+      expectedProject: "demo-proj",
+    });
+    expect(ok.status).toBe(0);
+    const agyBin = NodePath.join(home, ".local/bin/agy");
+    expect(ok.stdout.trim()).toBe(agyBin);
+    expect(NodeFS.readFileSync(agyBin, "utf8")).toBe(fakeAgyScript);
+    expect(NodeFS.statSync(agyBin).mode & 0o111).not.toBe(0);
+
+    // Rejects when broker answers with a different project.
+    const wrongProject = runWithFixture({
+      brokerProject: "wrong-proj",
+      expectedProject: "demo-proj",
+    });
+    expect(wrongProject.status).not.toBe(0);
+    expect(wrongProject.stderr).toContain("Vertex metadata broker");
   });
 });
 

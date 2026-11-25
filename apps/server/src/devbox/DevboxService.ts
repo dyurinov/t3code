@@ -9,6 +9,8 @@ import * as NodeOS from "node:os";
 import {
   DevboxError,
   EnvironmentId as EnvironmentIdSchema,
+  ProviderDriverKind,
+  ProviderInstanceEnvironmentVariableName,
   ProviderInstanceId,
   type DeletedDevbox,
   type DevboxClientPairing,
@@ -21,12 +23,14 @@ import {
   type DevboxUsageInput,
   type DevboxUsageResult,
   type EnvironmentId,
+  type ProviderInstanceConfig,
   type ServerSettings,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
 import { waitForHttpReady } from "@t3tools/shared/httpReadiness";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -59,19 +63,23 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ProviderCredentialStore from "../provider/ProviderCredentialStore.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as DevboxLogins from "./DevboxLogins.ts";
+import * as DevboxVertexMetadata from "./DevboxVertexMetadata.ts";
 import { environmentRpc } from "./devboxRpc.ts";
 import {
   ACTIVE_RUN_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
   INSTALL_CURSOR_SCRIPT,
   INSTALL_PERSONALIZATION_SCRIPT,
+  PREPARE_ANTIGRAVITY_SCRIPT,
   REFRESH_LOGIN_SCRIPT,
   PAIR_SCRIPT,
   PROVISION_REVISION,
   PROVISION_SCRIPT,
   REMOTE_T3_PORT,
   HOST_PORT_ON_BOX,
+  VERTEX_METADATA_PORT_ON_BOX,
   LINK_TOKEN_SCRIPT,
+  SETTINGS_TOKEN_SCRIPT,
   SIBLING_REMOVE_SCRIPT,
   SIBLING_SCRIPT,
   parseCoderList,
@@ -106,6 +114,8 @@ const DevboxRecord = Schema.Struct({
   spare: Schema.optionalKey(Schema.Boolean),
   /** Which provisioning script last set the box up; a newer one runs again on connect. */
   provisioned: Schema.optionalKey(Schema.String),
+  /** True while this host manages the box's Antigravity instance; cleared only once cleanup succeeds. */
+  antigravityManaged: Schema.optionalKey(Schema.Boolean),
 });
 type DevboxRecord = typeof DevboxRecord.Type;
 const Span = Schema.Tuple([Schema.Number, Schema.Number]);
@@ -221,6 +231,12 @@ export class DevboxService extends Context.Service<
 const PORT_BASE = 13800;
 const HOST_LINK_ACCESS = "auto";
 const CURSOR_INSTANCE_ID = ProviderInstanceId.make("cursor");
+const ANTIGRAVITY_INSTANCE_ID = ProviderInstanceId.make("antigravity");
+const ANTIGRAVITY_DRIVER_KIND = ProviderDriverKind.make("antigravity");
+const VERTEX_METADATA_ENV_NAME = ProviderInstanceEnvironmentVariableName.make("GCE_METADATA_HOST");
+const VERTEX_OWNER_ENV_NAME =
+  ProviderInstanceEnvironmentVariableName.make("T3_DEVBOX_VERTEX_OWNER");
+const VERTEX_METADATA_HOST_ON_BOX = `127.0.0.1:${VERTEX_METADATA_PORT_ON_BOX}`;
 const KEEP_ALIVE_INTERVAL = Duration.minutes(10);
 const LOGIN_SYNC_INTERVAL = Duration.minutes(10);
 const KEEP_ALIVE_EXTENSION = "1h";
@@ -240,6 +256,7 @@ export const make = Effect.gen(function* () {
   const peerLinks = yield* PeerLinks.PeerLinks;
   const auth = yield* EnvironmentAuth.EnvironmentAuth;
   const logins = yield* DevboxLogins.DevboxLogins;
+  const vertexMetadata = yield* DevboxVertexMetadata.DevboxVertexMetadata;
   const settings = yield* ServerSettingsService.ServerSettingsService;
   const secrets = yield* SecretResolver.SecretResolver;
   const httpClient = yield* HttpClient.HttpClient;
@@ -269,6 +286,8 @@ export const make = Effect.gen(function* () {
   const transient = yield* Ref.make<ReadonlyMap<string, Transient>>(new Map());
   const locks = yield* KeyedLock.make<string>();
   const tunnels = yield* FiberMap.make<string>();
+  const vertexTunnels = yield* FiberMap.make<string>();
+  const antigravitySyncs = yield* FiberMap.make<string>();
   const creations = yield* FiberMap.make<string>();
   const background = yield* FiberSet.make();
   const loginWorkers = yield* FiberMap.make<DevboxLoginProvider>();
@@ -279,6 +298,12 @@ export const make = Effect.gen(function* () {
   // The access tokens each box last got, so the sync only writes to boxes that are behind.
   const pushed = new Map<string, string>();
   const pushedCursorKeys = new Map<string, string>();
+  const pushedAntigravity = new Map<
+    string,
+    { readonly key: string; readonly outcome: "enabled" | "declined" }
+  >();
+  // Box names whose `antigravityManaged: true` flag is confirmed persisted to devboxes.json.
+  const persistedAntigravityManaged = new Set<string>();
   // The last renewal outcomes, so a box left with no usable token says why: the provider
   // refused the sign-in (user signs in again), or the box has no Formal (user binds it).
   const refused = new Set<DevboxLoginProvider>();
@@ -1195,6 +1220,377 @@ export const make = Effect.gen(function* () {
       effect.pipe(Effect.catch(() => Effect.logWarning("devbox Cursor key sync failed"))),
   );
 
+  // Shares this machine's Vertex AI ADC with devboxes over a dedicated SSH reverse tunnel to the
+  // host's owner-only Unix-socket metadata broker; the Google refresh token never leaves this host.
+  const antigravitySettingKey = (snapshot: ServerSettings) => {
+    const cfg = DevboxVertexMetadata.readHostAntigravityConfig(snapshot);
+    return cfg ? `${cfg.gcpProject}|${cfg.gcpLocation}` : undefined;
+  };
+  const vertexOwnerPaused = (hostId: string) => `${hostId}:paused`;
+  const vertexOwnerOptOut = (hostId: string) => `${hostId}:opt-out`;
+  const readVertexOwner = (instance: ProviderInstanceConfig | undefined) => {
+    const value = instance?.environment?.find(
+      (entry) => entry.name === VERTEX_OWNER_ENV_NAME,
+    )?.value;
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  };
+  const ownerBelongsToHost = (owner: string | undefined, hostId: string) =>
+    owner === hostId || owner === vertexOwnerPaused(hostId) || owner === vertexOwnerOptOut(hostId);
+  const hasMetadataHostEnv = (instance: ProviderInstanceConfig | undefined) =>
+    instance?.environment?.some(
+      (entry) =>
+        entry.name === VERTEX_METADATA_ENV_NAME &&
+        typeof entry.value === "string" &&
+        entry.value === VERTEX_METADATA_HOST_ON_BOX,
+    ) ?? false;
+  const hasCustomAntigravityConfig = (instance: ProviderInstanceConfig) => {
+    if (instance.enabled === true) return true;
+    if ((instance.environment?.length ?? 0) > 0) return true;
+    return (
+      typeof instance.config === "object" &&
+      instance.config !== null &&
+      !Array.isArray(instance.config) &&
+      Object.keys(instance.config).length > 0
+    );
+  };
+  const isUserCustomAntigravityConfig = (instance: ProviderInstanceConfig | undefined) => {
+    if (
+      typeof instance?.config !== "object" ||
+      instance.config === null ||
+      Array.isArray(instance.config)
+    ) {
+      return false;
+    }
+    const cfg = instance.config as Record<string, unknown>;
+    const hasApiKey =
+      cfg.apiKey !== undefined &&
+      cfg.apiKey !== null &&
+      (typeof cfg.apiKey !== "string" || cfg.apiKey.trim().length > 0);
+    if (hasApiKey) return true;
+    if (
+      typeof cfg.authMethod === "string" &&
+      cfg.authMethod.length > 0 &&
+      cfg.authMethod !== "agent-platform"
+    ) {
+      return true;
+    }
+    return false;
+  };
+  const classifyAntigravityEligibility = (
+    current: ProviderInstanceConfig | undefined,
+    hostOwnerId: string,
+  ): "eligible" | "declined" => {
+    if (current === undefined) return "eligible";
+    if (current.driver !== ANTIGRAVITY_DRIVER_KIND) return "declined";
+    const owner = readVertexOwner(current);
+    const ownedByUs = ownerBelongsToHost(owner, hostOwnerId);
+    // Never overwrite another host's managed instance or any unowned custom config (even disabled).
+    if (!ownedByUs && (owner !== undefined || hasCustomAntigravityConfig(current))) {
+      return "declined";
+    }
+    // Never overwrite a user's own API key or non-agent-platform auth added while paused.
+    if (isUserCustomAntigravityConfig(current)) {
+      return "declined";
+    }
+    // Respect explicit on-box opt-out across re-syncs and host off/on toggles.
+    if (ownedByUs && current.enabled === false && owner !== vertexOwnerPaused(hostOwnerId)) {
+      return "declined";
+    }
+    return "eligible";
+  };
+  const ensureVertexTunnel = (record: DevboxRecord) =>
+    FiberMap.run(
+      vertexTunnels,
+      record.name,
+      sshForward(record, [
+        "-R",
+        `127.0.0.1:${VERTEX_METADATA_PORT_ON_BOX}:${vertexMetadata.socketPath}`,
+      ]),
+      { onlyIfMissing: true },
+    );
+  const readAntigravitySyncState = Effect.fn("DevboxService.readAntigravitySyncState")(
+    function* () {
+      const cfg = DevboxVertexMetadata.readHostAntigravityConfig(yield* settings.getSettings);
+      if (!cfg) return { _tag: "disabled" as const };
+      if (!vertexMetadata.socketPath || !(yield* vertexMetadata.hasAdcCredentials)) {
+        // Host still wants Vertex ADC, but the broker or ADC file is temporarily unavailable;
+        // skip pushes without tearing down tunnels or disabling boxes.
+        return { _tag: "waiting-adc" as const };
+      }
+      return {
+        _tag: "enabled" as const,
+        ...cfg,
+        key: `${cfg.gcpProject}|${cfg.gcpLocation}|${VERTEX_METADATA_PORT_ON_BOX}|${vertexMetadata.brokerId}`,
+      };
+    },
+  );
+  const syncAntigravityBox = Effect.fn("DevboxService.syncAntigravityBox")(
+    function* (record: DevboxRecord) {
+      const transientState = (yield* Ref.get(transient)).get(record.name)?.state;
+      if (transientState === "stopping" || transientState === "deleting") return;
+      const syncState = yield* readAntigravitySyncState();
+      if (syncState._tag === "waiting-adc") return;
+      if (syncState._tag === "disabled") {
+        const latest = (yield* Ref.get(records)).get(record.name) ?? record;
+        const needsCleanup =
+          persistedAntigravityManaged.has(record.name) ||
+          latest.antigravityManaged === true ||
+          (yield* FiberMap.has(vertexTunnels, record.name));
+        yield* FiberMap.remove(vertexTunnels, record.name);
+        pushedAntigravity.delete(record.name);
+        if (!needsCleanup) return;
+        const hostOwnerId = yield* environment.getEnvironmentId;
+        const token = lastLine(yield* ssh(record.name, "sh -s", SETTINGS_TOKEN_SCRIPT));
+        if (!token) {
+          return yield* new DevboxError({
+            reason: "provision",
+            message: "The box did not return a settings token for Antigravity cleanup.",
+          });
+        }
+        yield* boxRpc(latest, token, (rpc) =>
+          Effect.gen(function* () {
+            const boxSettings = yield* rpc[WS_METHODS.serverGetSettings]({});
+            const current = boxSettings.providerInstances[ANTIGRAVITY_INSTANCE_ID];
+            const owner = readVertexOwner(current);
+            if (
+              current === undefined ||
+              current.driver !== ANTIGRAVITY_DRIVER_KIND ||
+              !ownerBelongsToHost(owner, hostOwnerId) ||
+              isUserCustomAntigravityConfig(current)
+            ) {
+              return;
+            }
+            // Distinguish host pause from explicit on-box opt-out; retrying a pause must stay paused.
+            const nextOwner =
+              current.enabled === false && owner !== vertexOwnerPaused(hostOwnerId)
+                ? vertexOwnerOptOut(hostOwnerId)
+                : vertexOwnerPaused(hostOwnerId);
+            if (current.enabled === false && owner === nextOwner && !hasMetadataHostEnv(current)) {
+              return;
+            }
+            const remainingEnv = (current.environment ?? []).filter(
+              (entry) =>
+                entry.name !== VERTEX_METADATA_ENV_NAME && entry.name !== VERTEX_OWNER_ENV_NAME,
+            );
+            yield* rpc[WS_METHODS.serverUpdateSettings]({
+              patch: {},
+              providerInstanceMutation: {
+                operation: "upsert",
+                instanceId: ANTIGRAVITY_INSTANCE_ID,
+                instance: {
+                  ...current,
+                  enabled: false,
+                  environment: [
+                    ...remainingEnv,
+                    { name: VERTEX_OWNER_ENV_NAME, value: nextOwner, sensitive: false },
+                  ],
+                },
+              },
+            });
+          }),
+        );
+        const currentRecord = (yield* Ref.get(records)).get(record.name);
+        if (
+          persistedAntigravityManaged.has(record.name) ||
+          currentRecord?.antigravityManaged === true
+        ) {
+          yield* updateRecord(record.name, ({ antigravityManaged: _managed, ...rest }) => rest);
+          persistedAntigravityManaged.delete(record.name);
+        }
+        return;
+      }
+
+      const cachedSync = pushedAntigravity.get(record.name);
+      if (
+        cachedSync?.key === syncState.key &&
+        (cachedSync.outcome === "declined" || (yield* FiberMap.has(vertexTunnels, record.name)))
+      ) {
+        return;
+      }
+      const hostOwnerId = yield* environment.getEnvironmentId;
+      const token = lastLine(yield* ssh(record.name, "sh -s", SETTINGS_TOKEN_SCRIPT));
+      if (!token) {
+        return yield* new DevboxError({
+          reason: "provision",
+          message: "The box did not return a settings token.",
+        });
+      }
+      // Check ownership and opt-out before opening a reverse tunnel or downloading agy.
+      const precheckSettings = yield* boxRpc(record, token, (rpc) =>
+        rpc[WS_METHODS.serverGetSettings]({}),
+      );
+      if (
+        classifyAntigravityEligibility(
+          precheckSettings.providerInstances[ANTIGRAVITY_INSTANCE_ID],
+          hostOwnerId,
+        ) === "declined"
+      ) {
+        yield* FiberMap.remove(vertexTunnels, record.name);
+        pushedAntigravity.set(record.name, { key: syncState.key, outcome: "declined" });
+        return;
+      }
+
+      const hadTunnel = yield* FiberMap.has(vertexTunnels, record.name);
+      pushedAntigravity.delete(record.name);
+      yield* ensureVertexTunnel(record);
+      yield* Effect.gen(function* () {
+        const prepareBody = yield* encodeJson({
+          gcpProject: syncState.gcpProject,
+          metadataHost: VERTEX_METADATA_HOST_ON_BOX,
+          brokerId: vertexMetadata.brokerId,
+        }).pipe(Effect.mapError(devboxError("provision")));
+        const binaryPath = lastLine(
+          yield* ssh(
+            record.name,
+            `python3 -c ${shellQuote(PREPARE_ANTIGRAVITY_SCRIPT)}`,
+            prepareBody,
+            "10 minutes",
+          ),
+        );
+        if (!binaryPath) {
+          return yield* new DevboxError({
+            reason: "provision",
+            message: "Antigravity binary preparation did not return an executable path.",
+          });
+        }
+        // Persist cleanup intent durably before the post-prepare read/write, and mint a fresh
+        // token in case the first-time agy download outlasted the 5-minute pre-check token.
+        if (!persistedAntigravityManaged.has(record.name)) {
+          yield* updateRecord(record.name, (entry) => ({
+            ...entry,
+            antigravityManaged: true,
+          }));
+          persistedAntigravityManaged.add(record.name);
+        }
+        const applyToken = lastLine(yield* ssh(record.name, "sh -s", SETTINGS_TOKEN_SCRIPT));
+        if (!applyToken) {
+          return yield* new DevboxError({
+            reason: "provision",
+            message: "The box did not return a settings token.",
+          });
+        }
+        const outcome = yield* boxRpc(record, applyToken, (rpc) =>
+          Effect.gen(function* () {
+            const boxSettings = yield* rpc[WS_METHODS.serverGetSettings]({});
+            const current = boxSettings.providerInstances[ANTIGRAVITY_INSTANCE_ID];
+            if (classifyAntigravityEligibility(current, hostOwnerId) === "declined") {
+              return "declined" as const;
+            }
+            const owner = readVertexOwner(current);
+            const existingConfig =
+              typeof current?.config === "object" &&
+              current.config !== null &&
+              !Array.isArray(current.config)
+                ? { ...(current.config as Record<string, unknown>) }
+                : {};
+            if (
+              owner === hostOwnerId &&
+              hasMetadataHostEnv(current) &&
+              current?.enabled === true &&
+              existingConfig.authMethod === "agent-platform" &&
+              existingConfig.gcpProject === syncState.gcpProject &&
+              existingConfig.gcpLocation === syncState.gcpLocation &&
+              existingConfig.binaryPath === binaryPath &&
+              !("apiKey" in existingConfig)
+            ) {
+              return "enabled" as const;
+            }
+            delete existingConfig.apiKey;
+            const remainingEnv = (current?.environment ?? []).filter(
+              (entry) =>
+                entry.name !== VERTEX_METADATA_ENV_NAME && entry.name !== VERTEX_OWNER_ENV_NAME,
+            );
+            yield* rpc[WS_METHODS.serverUpdateSettings]({
+              patch: {},
+              providerInstanceMutation: {
+                // Use atomic "create" when absent so a concurrent user-created entry is never overwritten.
+                operation: current === undefined ? "create" : "upsert",
+                instanceId: ANTIGRAVITY_INSTANCE_ID,
+                instance: {
+                  ...current,
+                  driver: ANTIGRAVITY_DRIVER_KIND,
+                  displayName: current?.displayName ?? "Antigravity",
+                  enabled: true,
+                  config: {
+                    ...existingConfig,
+                    authMethod: "agent-platform",
+                    gcpProject: syncState.gcpProject,
+                    gcpLocation: syncState.gcpLocation,
+                    binaryPath,
+                  },
+                  environment: [
+                    ...remainingEnv,
+                    {
+                      name: VERTEX_METADATA_ENV_NAME,
+                      value: VERTEX_METADATA_HOST_ON_BOX,
+                      sensitive: false,
+                    },
+                    {
+                      name: VERTEX_OWNER_ENV_NAME,
+                      value: hostOwnerId,
+                      sensitive: false,
+                    },
+                  ],
+                },
+              },
+            });
+            return "enabled" as const;
+          }),
+        );
+        if (outcome === "declined") {
+          yield* FiberMap.remove(vertexTunnels, record.name);
+        }
+        pushedAntigravity.set(record.name, { key: syncState.key, outcome });
+      }).pipe(
+        Effect.tapError(() =>
+          hadTunnel ? Effect.void : FiberMap.remove(vertexTunnels, record.name),
+        ),
+      );
+    },
+    (effect, record) =>
+      effect.pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("devbox Antigravity setup could not be synced", {
+            name: record.name,
+            error,
+          }),
+        ),
+      ),
+  );
+  const scheduleAntigravitySync = (record: DevboxRecord, onlyIfMissing: boolean) =>
+    FiberMap.run(antigravitySyncs, record.name, syncAntigravityBox(record), { onlyIfMissing });
+  const syncAntigravity = Effect.fn("DevboxService.syncAntigravity")(
+    function* (all: ReadonlyMap<string, CoderWorkspace> | undefined, onlyIfMissing = false) {
+      const syncState = yield* readAntigravitySyncState();
+      if (syncState._tag === "waiting-adc") return;
+      const inventory = all ?? (yield* workspaces);
+      const held = new Set(yield* locks.activeKeys);
+      const candidates = [...(yield* Ref.get(records)).values()].filter(
+        (record) =>
+          record.environmentId !== null &&
+          inventory.get(record.name)?.latest_build.status === "running" &&
+          !held.has(record.name),
+      );
+      for (const record of candidates) {
+        const state = (yield* Ref.get(transient)).get(record.name)?.state;
+        if (state === "stopping" || state === "deleting") continue;
+        const hasTunnel = yield* FiberMap.has(vertexTunnels, record.name);
+        const cachedSync = pushedAntigravity.get(record.name);
+        const shouldSync =
+          syncState._tag === "enabled"
+            ? cachedSync?.key !== syncState.key || (cachedSync.outcome !== "declined" && !hasTunnel)
+            : persistedAntigravityManaged.has(record.name) ||
+              record.antigravityManaged === true ||
+              hasTunnel;
+        if (shouldSync) {
+          yield* scheduleAntigravitySync(record, onlyIfMissing);
+        }
+      }
+    },
+    (effect, _all, _onlyIfMissing?: boolean) =>
+      effect.pipe(Effect.catch(() => Effect.logWarning("devbox Antigravity sync failed"))),
+  );
+
   /** Brings a running box to linked: T3 service, forward, link. Safe to repeat. */
   const connect = Effect.fn("DevboxService.connect")(
     function* (stored: DevboxRecord) {
@@ -1264,6 +1660,11 @@ export const make = Effect.gen(function* () {
               ),
             ),
           ),
+        ),
+        Effect.tap((record) =>
+          Effect.sync(() => {
+            pushedAntigravity.delete(record.name);
+          }).pipe(Effect.andThen(scheduleAntigravitySync(record, false))),
         ),
         Effect.tapError((error) =>
           setTransient(stored.name, { state: "failed", lastError: error.message }),
@@ -1410,6 +1811,9 @@ export const make = Effect.gen(function* () {
         const workspace = (yield* workspaces).get(name);
         if (workspace?.latest_build.status !== "running") {
           pushedCursorKeys.delete(name);
+          pushedAntigravity.delete(name);
+          yield* FiberMap.remove(antigravitySyncs, name);
+          yield* FiberMap.remove(vertexTunnels, name);
           // An autoupdating box moves to the template's latest version, which requires the
           // marker z devbox create sends; a default is ignored by templates without it, and
           // is only used rather than prompted for with --use-parameter-defaults.
@@ -1456,6 +1860,8 @@ export const make = Effect.gen(function* () {
         .withLock(
           name,
           FiberMap.remove(tunnels, name).pipe(
+            Effect.andThen(FiberMap.remove(antigravitySyncs, name)),
+            Effect.andThen(FiberMap.remove(vertexTunnels, name)),
             Effect.andThen(coder(["stop", name, "--yes"], "10 minutes")),
           ),
         )
@@ -1492,6 +1898,8 @@ export const make = Effect.gen(function* () {
           }
           yield* setTransient(name, { state: "deleting", lastError: null });
           yield* FiberMap.remove(tunnels, name);
+          yield* FiberMap.remove(antigravitySyncs, name);
+          yield* FiberMap.remove(vertexTunnels, name);
           if (record.environmentId !== null)
             yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
           yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
@@ -1505,6 +1913,8 @@ export const make = Effect.gen(function* () {
           }
           pushed.delete(name);
           pushedCursorKeys.delete(name);
+          pushedAntigravity.delete(name);
+          persistedAntigravityManaged.delete(name);
           unboundBoxes.delete(name);
           bindAttempts.delete(name);
           yield* Ref.update(records, (current) => {
@@ -1838,6 +2248,9 @@ export const make = Effect.gen(function* () {
   // ── background: reconnect running boxes, keep busy boxes awake ───────────
   const stored = yield* load;
   yield* Ref.set(records, new Map(stored.devboxes.map((record) => [record.name, record])));
+  for (const record of stored.devboxes) {
+    if (record.antigravityManaged === true) persistedAntigravityManaged.add(record.name);
+  }
   yield* Ref.set(nextNumber, stored.nextNumber);
   yield* Ref.set(history, stored.history ?? []);
   const reconnect = Effect.gen(function* () {
@@ -1893,11 +2306,15 @@ export const make = Effect.gen(function* () {
     const record = (yield* Ref.get(records)).get(name);
     if (record === undefined) return;
     yield* FiberMap.remove(tunnels, name);
+    yield* FiberMap.remove(antigravitySyncs, name);
+    yield* FiberMap.remove(vertexTunnels, name);
     if (record.environmentId !== null)
       yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
     yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
     pushed.delete(name);
     pushedCursorKeys.delete(name);
+    pushedAntigravity.delete(name);
+    persistedAntigravityManaged.delete(name);
     unboundBoxes.delete(name);
     bindAttempts.delete(name);
     const now = yield* Clock.currentTimeMillis;
@@ -1945,6 +2362,7 @@ export const make = Effect.gen(function* () {
     const all = yield* workspaces;
     yield* reconcileWithCoder(all);
     yield* syncCursor(all);
+    yield* syncAntigravity(all, true);
     for (const record of (yield* Ref.get(records)).values()) {
       if (all.get(record.name)?.latest_build.status !== "running") continue;
       if (yield* FiberMap.has(creations, record.name)) continue;
@@ -1967,10 +2385,32 @@ export const make = Effect.gen(function* () {
     }
   }).pipe(Effect.catchCause((cause) => Effect.logWarning("devbox heal failed", { cause })));
   const settingsChanges = yield* settings.subscribeChanges;
+  const initialSettings = yield* settings.getSettings;
+  let lastCursorSetting = cursorSetting(initialSettings);
+  let lastAntigravitySetting = antigravitySettingKey(initialSettings);
   yield* settingsChanges.pipe(
-    Stream.map(cursorSetting),
-    Stream.changes,
-    Stream.runForEach(() => syncCursor(undefined)),
+    Stream.map((snapshot) => ({
+      cursor: cursorSetting(snapshot),
+      antigravity: antigravitySettingKey(snapshot),
+    })),
+    Stream.changesWith((a, b) => a.cursor === b.cursor && a.antigravity === b.antigravity),
+    Stream.runForEach(({ cursor, antigravity }) =>
+      Effect.gen(function* () {
+        if (cursor !== lastCursorSetting) {
+          lastCursorSetting = cursor;
+          yield* syncCursor(undefined);
+        }
+        if (antigravity !== lastAntigravitySetting) {
+          lastAntigravitySetting = antigravity;
+          yield* syncAntigravity(undefined, false);
+        }
+      }).pipe(
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) => Effect.logWarning("devbox settings sync failed", { cause }),
+        ),
+      ),
+    ),
     Effect.forkScoped,
   );
   yield* forkParked(Effect.sleep(Duration.minutes(2)).pipe(Effect.andThen(heal), Effect.forever));
@@ -2021,5 +2461,6 @@ function shellQuote(value: string): string {
 
 export const layer = Layer.effect(DevboxService, make).pipe(
   Layer.provide(DevboxLogins.layer),
+  Layer.provide(DevboxVertexMetadata.DevboxVertexMetadata.layer),
   Layer.provide(FetchHttpClient.layer),
 );

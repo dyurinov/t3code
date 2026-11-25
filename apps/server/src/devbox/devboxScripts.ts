@@ -89,6 +89,8 @@ const REMOTE_T3_PORT = 3773;
 export { REMOTE_T3_PORT };
 /** Where this machine's T3 server answers on a box, through the reverse SSH forward. */
 export const HOST_PORT_ON_BOX = 13799;
+/** Where this machine's dedicated loopback GCE metadata broker answers on a box. */
+export const VERTEX_METADATA_PORT_ON_BOX = 13798;
 
 /** Reads the host's shared skills and personal instructions as JSON on stdin. */
 export const INSTALL_PERSONALIZATION_SCRIPT = String.raw`import json, os, pathlib, sys, tempfile
@@ -280,6 +282,11 @@ const LINK_TOKEN = String.raw`"$HOME/.t3/runtime/current/t3" auth session issue 
 `;
 
 export const LINK_TOKEN_SCRIPT = "set -eu\n" + LINK_TOKEN;
+
+/** Prints, as the last line, a 5-minute bearer token that may read settings and manage provider instances. */
+export const SETTINGS_TOKEN_SCRIPT = String.raw`set -eu
+"$HOME/.t3/runtime/current/t3" auth session issue --base-dir "$HOME/.t3" --scope orchestration:read --scope providers:manage --ttl 5m --label "T3 devbox settings" --token-only
+`;
 
 /**
  * Runs on a box as `sh -s -- <sibling> <port>`: the sibling's T3 server answers at
@@ -501,6 +508,105 @@ if wanted != current:
     print("installed")
 else:
     print("unchanged")
+`;
+
+/**
+ * Reads JSON `{gcpProject, metadataHost, brokerId}` on stdin, verifies the reverse-forwarded GCE
+ * metadata broker answers with the expected `gcpProject` and `brokerId`, ensures `~/.local/bin/agy`
+ * is installed from Google's verified release manifest (SHA-512 checked), and prints its path.
+ * Settings mutations are applied through the box server's RPC so writes stay serialized.
+ */
+export const PREPARE_ANTIGRAVITY_SCRIPT = String.raw`import hashlib, json, os, platform, shutil, sys, tarfile, tempfile, time, urllib.error, urllib.request
+payload = json.load(sys.stdin)
+gcp_project = str(payload["gcpProject"]).strip()
+metadata_host = str(payload["metadataHost"]).strip()
+broker_id = str(payload["brokerId"]).strip()
+MANIFEST_BASE = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"
+DOWNLOAD_PREFIX = "https://storage.googleapis.com/antigravity-public/antigravity-cli/"
+home = os.path.expanduser("~")
+binary_path = os.path.join(home, ".local", "bin", "agy")
+
+_local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+def fetch_metadata(path):
+    req = urllib.request.Request(f"http://{metadata_host}{path}", headers={"Metadata-Flavor": "Google"})
+    with _local_opener.open(req, timeout=3) as response:
+        flavor = response.headers.get("Metadata-Flavor")
+        body = response.read().decode("utf-8").strip()
+        return response.status, flavor, body
+
+def verify_metadata_broker():
+    last_error = "no response"
+    for attempt in range(10):
+        try:
+            p_status, p_flavor, project = fetch_metadata("/computeMetadata/v1/project/project-id")
+            b_status, b_flavor, actual_broker = fetch_metadata("/computeMetadata/v1/instance/attributes/t3-broker-id")
+            if (
+                p_status == 200
+                and p_flavor == "Google"
+                and project == gcp_project
+                and b_status == 200
+                and b_flavor == "Google"
+                and actual_broker == broker_id
+            ):
+                return
+            last_error = (
+                f"unexpected metadata response (project={project!r}, broker={actual_broker!r})"
+            )
+        except (urllib.error.URLError, OSError) as error:
+            last_error = str(error)
+        if attempt < 9:
+            time.sleep(1)
+    raise RuntimeError(f"Vertex metadata broker at {metadata_host} is not ready: {last_error}")
+
+def ensure_agy():
+    if os.path.isfile(binary_path) and os.access(binary_path, os.X_OK):
+        return
+    arch = platform.machine().lower()
+    if arch in ("x86_64", "amd64"):
+        target = "linux_amd64"
+    elif arch in ("aarch64", "arm64"):
+        target = "linux_arm64"
+    else:
+        raise RuntimeError(f"Unsupported architecture: {arch}")
+    with urllib.request.urlopen(f"{MANIFEST_BASE}/{target}.json", timeout=30) as response:
+        manifest = json.load(response)
+    url = str(manifest["url"])
+    expected_sha512 = str(manifest["sha512"]).lower()
+    if not url.startswith(DOWNLOAD_PREFIX) or not url.endswith(".tar.gz"):
+        raise RuntimeError(f"Unexpected Antigravity download URL: {url}")
+    os.makedirs(os.path.dirname(binary_path), exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(binary_path)) as tmp:
+        archive = os.path.join(tmp, "agy.tar.gz")
+        hasher = hashlib.sha512()
+        with urllib.request.urlopen(url, timeout=300) as response, open(archive, "wb") as out:
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                out.write(chunk)
+        if hasher.hexdigest().lower() != expected_sha512:
+            raise RuntimeError("SHA-512 checksum mismatch for Antigravity CLI")
+        extracted = os.path.join(tmp, "antigravity")
+        with tarfile.open(archive, "r:gz") as tar:
+            member = next(
+                (m for m in tar.getmembers() if m.isfile() and os.path.basename(m.name) in ("antigravity", "agy")),
+                None,
+            )
+            if member is None:
+                raise RuntimeError("Antigravity executable not found in archive")
+            src = tar.extractfile(member)
+            if src is None:
+                raise RuntimeError("Could not read Antigravity executable from archive")
+            with src, open(extracted, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        os.chmod(extracted, 0o755)
+        os.replace(extracted, binary_path)
+
+verify_metadata_broker()
+ensure_agy()
+print(binary_path)
 `;
 
 /** Prints 1 when the box's T3 server has a run in progress, else 0. */
