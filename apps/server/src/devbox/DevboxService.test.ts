@@ -559,6 +559,7 @@ describe("devbox Antigravity Vertex ADC sync", () => {
         const settingsChanges = yield* Queue.unbounded<ServerSettings>();
         const rpcReads = yield* Queue.unbounded<void>();
         const rpcMutations = yield* Queue.unbounded<ServerSettings>();
+        const authStarts = yield* Queue.unbounded<ProviderInstanceId>();
         const adcChecks = yield* Queue.unbounded<boolean>();
         const preparePayloads = yield* Queue.unbounded<string>();
         const vertexTunnelSpecs = yield* Queue.unbounded<ReadonlyArray<string>>();
@@ -569,13 +570,29 @@ describe("devbox Antigravity Vertex ADC sync", () => {
               tag,
             ): tag is Exclude<
               keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
-              typeof WS_METHODS.serverGetSettings | typeof WS_METHODS.serverUpdateSettings
-            > => tag !== WS_METHODS.serverGetSettings && tag !== WS_METHODS.serverUpdateSettings,
+              | typeof WS_METHODS.serverGetSettings
+              | typeof WS_METHODS.serverUpdateSettings
+              | typeof WS_METHODS.providerAuthStart
+            > =>
+              tag !== WS_METHODS.serverGetSettings &&
+              tag !== WS_METHODS.serverUpdateSettings &&
+              tag !== WS_METHODS.providerAuthStart,
           ),
         );
         const rpcHandlers = allowedRpcGroup.toLayer({
           [WS_METHODS.serverGetSettings]: () =>
             Queue.offer(rpcReads, undefined).pipe(Effect.as(boxSettings)),
+          [WS_METHODS.providerAuthStart]: (payload) =>
+            Queue.offer(authStarts, payload.instanceId).pipe(
+              Effect.as({
+                instanceId: payload.instanceId,
+                phase: "starting" as const,
+                flowId: null,
+                authorizationUrl: null,
+                expiresAt: null,
+                message: "Checking credentials.",
+              }),
+            ),
           [WS_METHODS.serverUpdateSettings]: (payload) =>
             Effect.gen(function* () {
               const rawStore = store.get("/state/userdata/devboxes.json");
@@ -839,6 +856,7 @@ describe("devbox Antigravity Vertex ADC sync", () => {
           expect(yield* Queue.take(persistedManaged)).toBe(true);
           yield* Queue.take(rpcReads);
           const afterEnable = yield* Queue.take(rpcMutations);
+          expect(yield* Queue.take(authStarts)).toBe(ANTIGRAVITY_ID);
           expect(managedAtUpsert[0]).toBe(true);
           expect(mutationOperations[0]).toBe("create");
           expect(afterEnable.providerInstances[ANTIGRAVITY_ID]).toMatchObject({

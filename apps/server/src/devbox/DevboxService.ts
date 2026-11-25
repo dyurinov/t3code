@@ -1493,6 +1493,22 @@ export const make = Effect.gen(function* () {
               existingConfig.binaryPath === binaryPath &&
               !("apiKey" in existingConfig)
             ) {
+              // On box restart/reconnect, settings already match but Antigravity's in-memory auth
+              // starts as "unknown" until providerAuthStart runs the non-interactive ADC handshake.
+              const boxConfig = yield* rpc[WS_METHODS.serverGetConfig]({}).pipe(
+                Effect.orElseSucceed(() => undefined),
+              );
+              const providerState = boxConfig?.providers.find(
+                (entry) => entry.instanceId === ANTIGRAVITY_INSTANCE_ID,
+              );
+              if (
+                providerState?.auth.status !== "authenticated" ||
+                providerState.models.length === 0
+              ) {
+                yield* rpc[WS_METHODS.providerAuthStart]({
+                  instanceId: ANTIGRAVITY_INSTANCE_ID,
+                }).pipe(Effect.ignore);
+              }
               return "enabled" as const;
             }
             delete existingConfig.apiKey;
@@ -1534,6 +1550,10 @@ export const make = Effect.gen(function* () {
                 },
               },
             });
+            // Trigger non-interactive Agent Platform auth so models load immediately without UI clicks.
+            yield* rpc[WS_METHODS.providerAuthStart]({
+              instanceId: ANTIGRAVITY_INSTANCE_ID,
+            }).pipe(Effect.ignore);
             return "enabled" as const;
           }),
         );
