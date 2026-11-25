@@ -75,6 +75,7 @@ import {
   SIBLING_REMOVE_SCRIPT,
   SIBLING_SCRIPT,
   parseCoderList,
+  isCurrentProvisionRevision,
   parsePairingToken,
   CoderBuild,
   devboxSpans,
@@ -1217,7 +1218,7 @@ export const make = Effect.gen(function* () {
         ),
       );
       // A box set up by this script starts T3 itself at boot: reconnecting is enough.
-      if (record.provisioned === PROVISION_REVISION && record.environmentId !== null) {
+      if (isCurrentProvisionRevision(record.provisioned) && record.environmentId !== null) {
         const reached = yield* startTunnel(record).pipe(
           Effect.as(true),
           Effect.orElseSucceed(() => false),

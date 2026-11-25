@@ -211,6 +211,8 @@ fi
 ln -sfn "$dir" "$HOME/.t3/runtime/current"
 `;
 
+const PROVISION_READINESS_CURL_TIMEOUTS = " --connect-timeout 2 --max-time 5";
+
 export const PROVISION_SCRIPT =
   INSTALL_T3_SCRIPT +
   String.raw`sudo -n hostnamectl set-hostname --pretty "$name" 2>/dev/null || true
@@ -255,7 +257,7 @@ systemctl --user daemon-reload
 systemctl --user enable t3code.service >/dev/null 2>&1
 if [ "$changed" = 1 ]; then systemctl --user restart t3code.service; else systemctl --user start t3code.service; fi
 for _ in $(seq 1 90); do
-  if curl -fsS --connect-timeout 2 --max-time 5 -o /dev/null "http://127.0.0.1:${REMOTE_T3_PORT}/.well-known/t3/environment" 2>/dev/null; then
+  if curl -fsS${PROVISION_READINESS_CURL_TIMEOUTS} -o /dev/null "http://127.0.0.1:${REMOTE_T3_PORT}/.well-known/t3/environment" 2>/dev/null; then
     # One task per box, in the box's own codez checkout. Adding it again is refused; that is fine.
     [ -d "$CODEZ_DIR" ] && "$dir/t3" project add --base-dir "$HOME/.t3" --title codez "$CODEZ_DIR" >/dev/null 2>&1 || true
     echo ready
@@ -634,15 +636,24 @@ for url in "$@"; do
 done
 `;
 
-/** Changes whenever PROVISION_SCRIPT does, so boxes set up by an older one are set up again. */
-export const PROVISION_REVISION = (() => {
+function provisionRevision(script: string): string {
   let hash = 0x811c9dc5;
-  for (let index = 0; index < PROVISION_SCRIPT.length; index++) {
-    hash ^= PROVISION_SCRIPT.charCodeAt(index);
+  for (let index = 0; index < script.length; index++) {
+    hash ^= script.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   return hash.toString(16);
-})();
+}
+
+export const PROVISION_REVISION = provisionRevision(PROVISION_SCRIPT);
+// Readiness timeouts only change the probe, so already-provisioned boxes can reconnect directly.
+const previousProvisionRevision = provisionRevision(
+  PROVISION_SCRIPT.replace(PROVISION_READINESS_CURL_TIMEOUTS, ""),
+);
+
+export function isCurrentProvisionRevision(revision: string | undefined): boolean {
+  return revision === PROVISION_REVISION || revision === previousProvisionRevision;
+}
 
 /** A Coder workspace build, as `/api/v2/workspaces/{id}/builds` returns it (newest first). */
 export const CoderBuild = Schema.Struct({

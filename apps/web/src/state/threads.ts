@@ -15,9 +15,11 @@ import {
 import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
+import { msg } from "gt-react";
 
 import { randomUUID } from "../lib/utils";
 import { toastManager } from "../components/ui/toast";
+import { m } from "../i18n/messages";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
@@ -45,12 +47,13 @@ export const threadEnvironment = createThreadEnvironmentAtoms(
     onError: (error) =>
       toastManager.add({
         type: "error",
-        title: "Could not synchronize thread organization",
+        title: m(msg("Could not synchronize thread organization")),
         description: error instanceof Error ? error.message : String(error),
       }),
   },
 );
 const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
+export const environmentThreadStateAtom = environmentThreads.stateAtom;
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
   environmentThreads.stateAtom,
 );

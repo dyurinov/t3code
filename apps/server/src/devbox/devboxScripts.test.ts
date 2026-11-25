@@ -18,6 +18,8 @@ import {
   slugifyDevboxName,
   uniqueDevboxName,
   INSTALL_T3_SCRIPT,
+  isCurrentProvisionRevision,
+  PROVISION_REVISION,
   PROVISION_SCRIPT,
   INSTALL_PERSONALIZATION_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
@@ -352,6 +354,12 @@ describe("T3 release installation", () => {
       expect(line).toContain("--connect-timeout");
       expect(line).toContain("--max-time");
     }
+  });
+
+  it("lets boxes provisioned before the readiness timeout reconnect", () => {
+    expect(isCurrentProvisionRevision(PROVISION_REVISION)).toBe(true);
+    expect(isCurrentProvisionRevision("b1cd7455")).toBe(true);
+    expect(isCurrentProvisionRevision(undefined)).toBe(false);
   });
 });
 
