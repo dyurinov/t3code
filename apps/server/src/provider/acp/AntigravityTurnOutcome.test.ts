@@ -125,7 +125,11 @@ describe("watchAntigravityPromptOutcome", () => {
       const turn = (
         steps: ReadonlyArray<readonly [number, Uint8Array]>,
         result: EffectAcpSchema.PromptResponse = { stopReason: "end_turn" },
-        options?: { readonly retired?: boolean },
+        options?: {
+          readonly retired?: boolean;
+          readonly hadOutput?: boolean;
+          readonly isNativeSlashCommand?: boolean;
+        },
       ) =>
         Effect.gen(function* () {
           const check = yield* watchAntigravityPromptOutcome(profileDirectory, sessionId);
@@ -330,6 +334,46 @@ describe("watchAntigravityPromptOutcome", () => {
           code: "QUOTA_EXHAUSTED",
           retryable: true,
         }),
+      );
+      // agy acp can silently drop a turn when OAuth refresh fails before reaching the model:
+      // only USER_INPUT is recorded, with no output, usage, or error step.
+      assert.deepEqual(
+        yield* turn([[USER_INPUT, input]], { stopReason: "end_turn" }, { hadOutput: false }),
+        reusable({
+          class: "provider_error",
+          message:
+            "Antigravity ended this turn before reaching the model. T3 Code will restart the agent on the next message.",
+          code: "EMPTY_TURN",
+          retryable: true,
+        }),
+      );
+      // Guard against false positives when output, usage, slash commands, or retirement apply.
+      assert.isUndefined(
+        yield* turn([[USER_INPUT, input]], { stopReason: "end_turn" }, { hadOutput: true }),
+      );
+      assert.isUndefined(
+        yield* turn(
+          [[USER_INPUT, input]],
+          { stopReason: "end_turn" },
+          { hadOutput: false, isNativeSlashCommand: true },
+        ),
+      );
+      assert.isUndefined(
+        yield* turn(
+          [[USER_INPUT, input]],
+          { stopReason: "end_turn" },
+          { hadOutput: false, retired: true },
+        ),
+      );
+      assert.isUndefined(
+        yield* turn(
+          [[USER_INPUT, input]],
+          {
+            stopReason: "end_turn",
+            usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+          },
+          { hadOutput: false },
+        ),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );

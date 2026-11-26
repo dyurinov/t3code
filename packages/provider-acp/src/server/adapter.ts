@@ -441,12 +441,14 @@ export interface AcpAdapterV2Flavor {
    * by silence when the inactivity watchdog retires the prompt (`retired`). A failure
    * restarts the runtime; a `broken` thread's next turn starts a fresh session.
    */
-  readonly watchPromptOutcome?: (
-    sessionId: string,
-  ) => Effect.Effect<
+  readonly watchPromptOutcome?: (sessionId: string) => Effect.Effect<
     (
       result: EffectAcpSchema.PromptResponse,
-      options?: { readonly retired?: boolean },
+      options?: {
+        readonly retired?: boolean;
+        readonly hadOutput?: boolean;
+        readonly isNativeSlashCommand?: boolean;
+      },
     ) => Effect.Effect<AcpPromptOutcomeFailure | undefined>
   >;
   readonly requiresSignIn?: (cause: unknown) => boolean;
@@ -741,6 +743,11 @@ export interface AcpAdapterV2Flavor {
    * agent request, tool or subagent is open, and replaces the agent before the next turn.
    */
   readonly promptInactivityTimeout?: Duration.Input;
+  /**
+   * Replaces an idle agent process before starting a new turn once it has been alive this long,
+   * resuming the native session on a fresh process.
+   */
+  readonly maxRuntimeAge?: Duration.Input;
   /** Grok can retain task_already_running until process exit. */
   readonly restartRuntimeAfterInterrupt?: boolean;
   /** Prompt failures after which the agent process keeps failing until replaced. */
@@ -2931,6 +2938,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           flavor.promptInactivityTimeout === undefined
             ? undefined
             : Duration.toMillis(flavor.promptInactivityTimeout);
+        const maxRuntimeAgeMillis =
+          flavor.maxRuntimeAge === undefined ? undefined : Duration.toMillis(flavor.maxRuntimeAge);
+        let runtimeStartedAt = yield* Clock.currentTimeMillis;
         // Each runtime owns its unanswered agent requests, so a dead process's leftovers
         // and late callbacks never reach its replacement.
         let openAgentRequests = new Set<string>();
@@ -8040,6 +8050,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               Effect.provideService(AgentScope, agentScope),
               Effect.provideService(AgentScopeThreadId, threadId ?? undefined),
             );
+          runtimeStartedAt = yield* Clock.currentTimeMillis;
         });
 
         const startAcpRuntime = Effect.fnUntraced(function* (
@@ -8128,8 +8139,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               Effect.suspend(() => handleCandidateSessionUpdate(notification)),
             );
             yield* wireAcpRuntimeMcpHandlers(replacementRuntime, replacementMcpBridge);
+            const replacementStartedAt = yield* Clock.currentTimeMillis;
             const started = yield* replacementRuntime.start();
-            return { replacementRuntime, started };
+            return { replacementRuntime, started, replacementStartedAt };
           });
           const replacementExit = yield* Effect.exit(
             (flavor.withRuntimeStartup?.(startup) ?? startup).pipe(
@@ -8173,6 +8185,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   }
                   yield* quarantineNativeTransportAtGeneration(previousGeneration);
                   runtime = replacementExit.value.replacementRuntime;
+                  runtimeStartedAt = replacementExit.value.replacementStartedAt;
                   runtimeScope = replacementScope;
                   runtimeMcpBridge = replacementMcpBridge;
                   openAgentRequests = replacementAgentRequests;
@@ -9407,6 +9420,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           }
           return {
             prompt,
+            isNativeSlashCommand,
             instructionState: text === messageText ? undefined : instructionState,
             runtimeInstructions: sendRuntimeInstructions ? runtimeInstructions : undefined,
             appContextEntries,
@@ -9489,6 +9503,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 }
               | undefined;
             readonly compactSession: AcpAdapterV2Flavor["compactSession"];
+            readonly isNativeSlashCommand: boolean;
           },
         ): Effect.Effect<void> => {
           const sequence = ++context.promptSequence;
@@ -9575,13 +9590,23 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   }
                   if (context.finalized || followsAgentWorkState || superseded()) return;
                   // ACP v2 reports a failed prompt through its idle stop reason, not an RPC error.
+                  const hadOutput =
+                    context.assistant.current !== null ||
+                    context.assistant.nextSegment > 0 ||
+                    context.reasoning.current !== null ||
+                    context.reasoning.nextSegment > 0 ||
+                    context.tools.size > 0 ||
+                    context.subagents.size > 0;
                   const hiddenFailure =
                     settle.checkPromptOutcome === undefined ||
                     context.interrupted ||
                     result.stopReason === "error" ||
                     result.stopReason === "cancelled"
                       ? undefined
-                      : yield* settle.checkPromptOutcome(result);
+                      : yield* settle.checkPromptOutcome(result, {
+                          hadOutput,
+                          isNativeSlashCommand: settle.isNativeSlashCommand,
+                        });
                   const resumeWith = hiddenFailure?.resumeWith;
                   if (
                     hiddenFailure !== undefined &&
@@ -9761,6 +9786,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             // load/resume can invoke client methods; install the incoming policy before activation.
             latestRuntimePolicy = turnInput.runtimePolicy;
             const requestedSessionId = yield* nativeThreadId(driver, turnInput.providerThread);
+            // Continuations consume existing wake traffic without re-prompting ACP.
+            const isContinuationTurn =
+              (postSettleContinuationEnabled || followsAgentWorkState) &&
+              acpIsProviderContinuationMessage(turnInput.message);
+            const runtimeAgedOut =
+              maxRuntimeAgeMillis !== undefined &&
+              (canLoadSession || canResumeSession) &&
+              !isContinuationTurn &&
+              (yield* Ref.get(runningBackgroundTaskIds)).size === 0 &&
+              (yield* Ref.get(detachedBackgroundCommands)).size === 0 &&
+              (yield* Ref.get(carryoverSubagents)) === null &&
+              (yield* Clock.currentTimeMillis) - runtimeStartedAt >= maxRuntimeAgeMillis;
+            if (runtimeAgedOut) {
+              yield* Ref.set(runtimeRestartRequired, true);
+            }
             const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired(
               turnInput.threadId,
             );
@@ -9831,10 +9871,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             });
             yield* Ref.set(suppressPostSettleMonitorPrompt, false);
             yield* Ref.set(handledBackgroundTaskIdsInActiveTurn, new Set());
-            // Continuations consume existing wake traffic without re-prompting ACP.
-            const isContinuationTurn =
-              (postSettleContinuationEnabled || followsAgentWorkState) &&
-              acpIsProviderContinuationMessage(turnInput.message);
             const isAppOwnedWakeTurn = acpIsAppOwnedWakeTurn(turnInput.message);
             if (!isAppOwnedWakeTurn) {
               yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
@@ -10146,6 +10182,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 promptParts,
                 appContext: initialAppContext,
                 compactSession,
+                isNativeSlashCommand: promptParts?.isNativeSlashCommand === true,
               },
             ).pipe(Effect.forkIn(sessionScope));
           },
@@ -10291,6 +10328,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       promptParts: null,
                       appContext: steerAppContext,
                       compactSession: undefined,
+                      isNativeSlashCommand,
                     },
                   ).pipe(Effect.forkIn(sessionScope));
                   yield* Deferred.succeed(released, undefined);

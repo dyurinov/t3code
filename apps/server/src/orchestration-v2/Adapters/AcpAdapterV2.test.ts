@@ -1650,6 +1650,195 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("recycles an idle runtime before starting a turn once maxRuntimeAge elapses", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("acp-test-max-runtime-age");
+      const threadId = ThreadId.make("thread-acp-max-runtime-age");
+      const promptRuntimes: Array<number> = [];
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          maxRuntimeAge: "45 minutes",
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+            mockAgentPath: yield* bundledMockAgentPath,
+            wrapRuntime: (runtime, runtimeOrdinal) => ({
+              ...runtime,
+              prompt: () =>
+                Effect.sync(() => {
+                  promptRuntimes.push(runtimeOrdinal);
+                  return { stopReason: "end_turn" as const };
+                }),
+            }),
+          }),
+        },
+      });
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const session = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-max-runtime-age"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* session.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const runTurn = (ordinal: number) =>
+        Effect.gen(function* () {
+          yield* session.startTurn(
+            makeTurnInput({
+              threadId,
+              providerThread,
+              instanceId,
+              runtimePolicy,
+              now: yield* DateTime.now,
+              ordinal,
+            }),
+          );
+          const events = Array.from(
+            yield* session.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            ),
+          );
+          return events.at(-1);
+        });
+
+      const first = yield* runTurn(1);
+      assert.equal(first?.type === "turn.terminal" ? first.status : null, "completed");
+
+      yield* TestClock.adjust("44 minutes");
+      const beforeExpiry = yield* runTurn(2);
+      assert.equal(
+        beforeExpiry?.type === "turn.terminal" ? beforeExpiry.status : null,
+        "completed",
+      );
+      assert.deepEqual(promptRuntimes, [1, 1]);
+
+      yield* TestClock.adjust("1 minute");
+      const afterExpiry = yield* runTurn(3);
+      assert.equal(afterExpiry?.type === "turn.terminal" ? afterExpiry.status : null, "completed");
+      assert.deepEqual(promptRuntimes, [1, 1, 2]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("passes hadOutput and isNativeSlashCommand to watchPromptOutcome", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("acp-test-prompt-outcome-options");
+      const threadId = ThreadId.make("thread-acp-prompt-outcome-options");
+      const observed: Array<{
+        readonly hadOutput?: boolean;
+        readonly isNativeSlashCommand?: boolean;
+      }> = [];
+      let emitUpdate:
+        | ((notification: EffectAcpSchema.SessionNotification) => Effect.Effect<void>)
+        | undefined;
+      let watchedSessionId = "";
+      let turnIndex = 0;
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          watchPromptOutcome: (sessionId) =>
+            Effect.sync(() => {
+              watchedSessionId = sessionId;
+              return (_result, options) =>
+                Effect.sync(() => {
+                  observed.push({
+                    ...(options?.hadOutput === undefined ? {} : { hadOutput: options.hadOutput }),
+                    ...(options?.isNativeSlashCommand === undefined
+                      ? {}
+                      : { isNativeSlashCommand: options.isNativeSlashCommand }),
+                  });
+                  return undefined;
+                });
+            }),
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+            mockAgentPath: yield* bundledMockAgentPath,
+            wrapRuntime: (runtime) => ({
+              ...runtime,
+              handleSessionUpdate: (handler) => {
+                emitUpdate = (notification) => handler(notification).pipe(Effect.ignore);
+                return runtime.handleSessionUpdate(handler);
+              },
+              prompt: () =>
+                Effect.gen(function* () {
+                  turnIndex += 1;
+                  if (turnIndex === 2 && emitUpdate !== undefined) {
+                    yield* emitUpdate({
+                      sessionId: watchedSessionId,
+                      update: {
+                        sessionUpdate: "agent_message_chunk",
+                        content: { type: "text", text: "hello" },
+                      },
+                    });
+                  }
+                  return { stopReason: "end_turn" as const };
+                }),
+            }),
+          }),
+        },
+      });
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const session = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-prompt-outcome-options"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* session.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const runTurn = (ordinal: number, messageText: string) =>
+        Effect.gen(function* () {
+          yield* session.startTurn(
+            makeTurnInput({
+              threadId,
+              providerThread,
+              instanceId,
+              runtimePolicy,
+              now: yield* DateTime.now,
+              ordinal,
+              messageText,
+            }),
+          );
+          yield* session.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runDrain,
+          );
+        });
+
+      yield* runTurn(1, "silent turn");
+      yield* runTurn(2, "answered turn");
+      yield* runTurn(3, "/compact");
+      assert.deepEqual(observed, [
+        { hadOutput: false, isNativeSlashCommand: false },
+        { hadOutput: true, isNativeSlashCommand: false },
+        { hadOutput: false, isNativeSlashCommand: true },
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.live("pairs responses to concurrent same-method requests in request order", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

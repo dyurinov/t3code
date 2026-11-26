@@ -97,6 +97,9 @@ const encodeRememberedRuntimeModes = Schema.encodeSync(RememberedRuntimeModes);
 const REFRESH_FAILED =
   "Could not refresh Antigravity models. The previous model list is unchanged.";
 const PYTHON_SOCKS_REQUIRED = "python-socks is required to use a SOCKS proxy";
+// agy acp captures the authenticate RPC context in file-backed Google ADC refreshers, so
+// tokens fail with `context canceled` at 60m; recycle idle runtimes before expiry.
+const ANTIGRAVITY_ADC_MAX_RUNTIME_AGE = "45 minutes" as const;
 
 // Keep upstream diagnostics in cause; only recognized, fixed text reaches clients.
 function refreshFailureDetail(cause: unknown) {
@@ -631,6 +634,11 @@ export const AntigravityDriver: ProviderDriver<
         ),
       ),
       profileDirectory,
+      ...(auth.authMethod === "agent-platform" &&
+      !auth.apiKey &&
+      !processEnvironment.GCE_METADATA_HOST?.trim()
+        ? { maxRuntimeAge: ANTIGRAVITY_ADC_MAX_RUNTIME_AGE }
+        : {}),
       onSessionStarted: (started, cwd) =>
         provider.onSessionStarted(started, cwd).pipe(Effect.andThen(authFlow.onSignedInElsewhere)),
       onSessionEvent: (event, cwd) => {

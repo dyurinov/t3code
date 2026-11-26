@@ -13,6 +13,8 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 
 import { antigravityManagedPath, antigravityProfileRoot } from "./AntigravityProfilePaths.ts";
 
+// CORTEX_STEP_TYPE_USER_INPUT: recorded before the agent invokes the model.
+const USER_INPUT_STEP_TYPE = 14;
 // CORTEX_STEP_TYPE_ERROR_MESSAGE in the native trajectory.
 const ERROR_STEP_TYPE = 17;
 // CORTEX_STEP_TYPE_PLANNER_RESPONSE: the model answered within this turn.
@@ -196,10 +198,17 @@ function verificationErrorInfo(text: string) {
   return undefined;
 }
 
+interface AntigravityPromptOutcomeOptions {
+  readonly retired?: boolean;
+  readonly hadOutput?: boolean;
+  readonly isNativeSlashCommand?: boolean;
+}
+
 function turnFailure(
-  stopReason: EffectAcpSchema.StopReason,
+  result: EffectAcpSchema.PromptResponse,
   step: LastStep | undefined,
   now: DateTime.Utc | undefined,
+  options?: AntigravityPromptOutcomeOptions,
 ):
   | {
       readonly failure: OrchestrationV2ProviderFailure;
@@ -207,16 +216,39 @@ function turnFailure(
       readonly resumeWith?: string;
     }
   | undefined {
+  const { stopReason } = result;
   const errorText =
     step?.type === ERROR_STEP_TYPE
       ? new TextDecoder().decode(step.payload ?? new Uint8Array())
       : undefined;
+  const reusable = (failure: OrchestrationV2ProviderFailure) =>
+    ({ failure, threadDisposition: "reusable" }) as const;
+  // agy acp can return `end_turn` without an error step when OAuth token refresh fails before
+  // reaching the model; only USER_INPUT is written and no output or usage is produced.
+  if (
+    errorText === undefined &&
+    stopReason === "end_turn" &&
+    result.usage === undefined &&
+    options?.retired !== true &&
+    options?.hadOutput !== true &&
+    options?.isNativeSlashCommand !== true &&
+    step?.type === USER_INPUT_STEP_TYPE &&
+    !step.reachedModel
+  ) {
+    return reusable(
+      makeProviderFailure({
+        class: "provider_error",
+        message:
+          "Antigravity ended this turn before reaching the model. T3 Code will restart the agent on the next message.",
+        code: "EMPTY_TURN",
+        retryable: true,
+      }),
+    );
+  }
   // The agent maps only the SDK's QUOTA_EXHAUSTED stop reason to `refusal`.
   if (errorText === undefined && stopReason !== "refusal") return undefined;
   const text = errorText ?? "";
   const apiError = API_ERROR.exec(text) ?? statusError(text);
-  const reusable = (failure: OrchestrationV2ProviderFailure) =>
-    ({ failure, threadDisposition: "reusable" }) as const;
   if (stopReason === "refusal" || QUOTA_EXHAUSTED.test(text)) {
     return reusable(
       makeProviderFailure({
@@ -288,8 +320,10 @@ export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.w
   profileDirectory: string,
   sessionId: string,
 ) {
-  const typedOnly = (result: EffectAcpSchema.PromptResponse) =>
-    DateTime.now.pipe(Effect.map((now) => turnFailure(result.stopReason, undefined, now)));
+  const typedOnly = (
+    result: EffectAcpSchema.PromptResponse,
+    options?: AntigravityPromptOutcomeOptions,
+  ) => DateTime.now.pipe(Effect.map((now) => turnFailure(result, undefined, now, options)));
   if (!NATIVE_SESSION_ID.test(sessionId)) return typedOnly;
   const segments = [...conversationSegments, `${sessionId}.db`];
   const before = yield* Effect.tryPromise({
@@ -328,7 +362,7 @@ export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.w
   }
   return Effect.fn("AntigravityTurnOutcome.check")(function* (
     result: EffectAcpSchema.PromptResponse,
-    options?: { readonly retired?: boolean },
+    options?: AntigravityPromptOutcomeOptions,
   ) {
     // The same file as before the prompt, or one this prompt created, still unlinked.
     const after = yield* Effect.tryPromise({
@@ -349,6 +383,6 @@ export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.w
       : undefined;
     // A retired prompt's check runs long after the error, so a relative delay has no anchor.
     const now = options?.retired === true ? undefined : yield* DateTime.now;
-    return turnFailure(result.stopReason, step, now);
+    return turnFailure(result, step, now, options);
   });
 });
