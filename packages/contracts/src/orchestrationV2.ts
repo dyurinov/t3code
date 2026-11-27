@@ -522,7 +522,13 @@ export const OrchestrationV2AppThread = Schema.Struct({
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
-      Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
+      Schema.Struct({
+        type: Schema.Literal("run"),
+        threadId: ThreadId,
+        runId: RunId,
+        /** Explicit inherited run IDs carried on thread events when imported/repaired out of live order. */
+        forkRunIds: Schema.optionalKey(Schema.Array(RunId)),
+      }),
       Schema.Struct({ type: Schema.Literal("node"), nodeId: NodeId }),
       Schema.Struct({
         type: Schema.Literal("provider_thread"),

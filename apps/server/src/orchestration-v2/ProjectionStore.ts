@@ -2563,7 +2563,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "thread.model-selection-updated":
             case "thread.provider-switched":
             case "thread.guest-share-updated": {
-              const payloadJson = yield* encodeThreadPayload(event.payload);
+              const explicitForkRunIds =
+                (event.type === "thread.created" ||
+                  event.type === "thread.metadata-updated" ||
+                  event.type === "thread.deleted") &&
+                event.payload.forkedFrom?.type === "run"
+                  ? event.payload.forkedFrom.forkRunIds
+                  : undefined;
+              // Never persist or send forkRunIds inside payload_json; it lives in fork_run_ids_json.
+              const storedThreadPayload =
+                event.payload.forkedFrom?.type === "run" &&
+                event.payload.forkedFrom.forkRunIds !== undefined
+                  ? {
+                      ...event.payload,
+                      forkedFrom: {
+                        type: "run" as const,
+                        threadId: event.payload.forkedFrom.threadId,
+                        runId: event.payload.forkedFrom.runId,
+                      },
+                    }
+                  : event.payload;
+              const payloadJson = yield* encodeThreadPayload(storedThreadPayload);
               const payload = parseEncodedPayload(payloadJson);
               yield* sql`
               INSERT INTO orchestration_v2_projection_threads (
@@ -2611,8 +2631,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 deleted_at = excluded.deleted_at,
                 payload_json = excluded.payload_json
             `;
-              // EventSink applies committed events serially; retries retain the original membership.
-              if (event.type === "thread.created" && event.payload.forkedFrom?.type === "run") {
+              // EventSink applies committed events serially; retries retain the original membership
+              // unless an explicit `forkRunIds` payload carries repaired/imported membership.
+              if (explicitForkRunIds !== undefined) {
+                yield* sql`
+                  UPDATE orchestration_v2_projection_threads
+                  SET fork_run_ids_json = ${encodeIdList(explicitForkRunIds)}
+                  WHERE thread_id = ${event.threadId}
+                `;
+              } else if (
+                event.type === "thread.created" &&
+                event.payload.forkedFrom?.type === "run"
+              ) {
                 const fork = event.payload.forkedFrom;
                 yield* sql`
                   UPDATE orchestration_v2_projection_threads

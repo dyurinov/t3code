@@ -214,6 +214,8 @@ ln -sfn "$dir" "$HOME/.t3/runtime/current"
 `;
 
 const PROVISION_READINESS_CURL_TIMEOUTS = " --connect-timeout 2 --max-time 5";
+const PROVISION_UNSEAL_SNIPPET =
+  '\nrm -f "$unit.t3-sealed"\nif [ -e "$HOME/.t3/userdata/server-owner.sqlite" ]; then chmod 0644 "$HOME/.t3/userdata/server-owner.sqlite"; fi';
 
 export const PROVISION_SCRIPT =
   INSTALL_T3_SCRIPT +
@@ -254,7 +256,7 @@ else:
 PY
 )
 [ "$settings_changed" = 1 ] && changed=1
-rm -f "$unit.new"
+rm -f "$unit.new"${PROVISION_UNSEAL_SNIPPET}
 systemctl --user daemon-reload
 systemctl --user enable t3code.service >/dev/null 2>&1
 if [ "$changed" = 1 ]; then systemctl --user restart t3code.service; else systemctl --user start t3code.service; fi
@@ -609,7 +611,7 @@ ensure_agy()
 print(binary_path)
 `;
 
-/** Prints 1 when the box's T3 server has a run in progress, else 0. */
+/** Prints 1 when the box's T3 server has a run in progress (for keep-awake), else 0. */
 export const ACTIVE_RUN_SCRIPT = String.raw`import os, sqlite3
 path = os.path.expanduser("~/.t3/userdata/statev2.sqlite")
 try:
@@ -618,6 +620,488 @@ try:
     print(1 if row and row[0] else 0)
 except Exception:
     print(0)
+`;
+
+/**
+ * Stops t3code.service, acquires `server-owner.sqlite` (`BEGIN EXCLUSIVE`), and with `--check-active`
+ * exits 42 (`ACTIVE_RUNS:`) if any run is active or changed status during shutdown. With `--hold`,
+ * prints `FENCED` once locked and holds the exclusive lock until signaled, stdout closes, or timeout.
+ */
+export const FENCE_T3_SCRIPT = String.raw`import json, os, pathlib, select, signal, sqlite3, subprocess, sys, time
+
+check_active = "--check-active" in sys.argv[1:]
+hold_lock = "--hold" in sys.argv[1:]
+userdata = pathlib.Path(os.path.expanduser("~/.t3/userdata"))
+db_path = userdata / "statev2.sqlite"
+lock_path = userdata / "server-owner.sqlite"
+ACTIVE_STATUSES = {"preparing", "queued", "starting", "running", "waiting"}
+
+def read_runs():
+    if not db_path.exists():
+        return None
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=15)
+    try:
+        has_table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='orchestration_v2_projection_runs'"
+        ).fetchone()
+        if not has_table:
+            return {}
+        return {
+            row[0]: row[1]
+            for row in db.execute("SELECT run_id, status FROM orchestration_v2_projection_runs")
+        }
+    finally:
+        db.close()
+
+pre_runs = read_runs()
+if check_active and pre_runs is not None:
+    active_before = sum(1 for status in pre_runs.values() if status in ACTIVE_STATUSES)
+    if active_before > 0:
+        sys.stderr.write(f"ACTIVE_RUNS:{active_before}\n")
+        raise SystemExit(42)
+
+env = os.environ.copy()
+env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+try:
+    show = subprocess.run(
+        ["systemctl", "--user", "show", "-p", "LoadState", "--value", "t3code.service"],
+        capture_output=True, text=True, timeout=15, env=env, check=False,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit("systemctl show timed out while checking t3code.service")
+if show.returncode != 0:
+    raise SystemExit(f"systemctl show failed ({show.returncode}): {show.stderr.strip()}")
+load_state = show.stdout.strip()
+if load_state == "loaded":
+    try:
+        stop = subprocess.run(
+            ["systemctl", "--user", "stop", "t3code.service"],
+            capture_output=True, text=True, timeout=90, env=env, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit("timed out waiting for t3code.service to stop")
+    if stop.returncode != 0:
+        raise SystemExit(f"systemctl stop failed ({stop.returncode}): {stop.stderr.strip()}")
+    try:
+        state_res = subprocess.run(
+            ["systemctl", "--user", "is-active", "t3code.service"],
+            capture_output=True, text=True, timeout=15, env=env, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit("systemctl is-active timed out while verifying t3code.service stopped")
+    unit_state = state_res.stdout.strip()
+    if unit_state not in ("inactive", "failed"):
+        raise SystemExit(
+            f"t3code.service did not stop (state={unit_state!r}, rc={state_res.returncode}): {state_res.stderr.strip()}"
+        )
+elif load_state not in ("not-found", "masked"):
+    raise SystemExit(f"unexpected t3code.service LoadState: {load_state!r}")
+
+# Acquire the same exclusive ownership lock T3 servers hold (serverOwnership.ts) so any
+# unmanaged t3 serve / t3 start is rejected and no server can start until our scope releases.
+# Restore 0644 if a prior interrupted delete left server-owner.sqlite sealed at 000; any live
+# server that opened the inode beforehand still holds its POSIX lock and fails BEGIN EXCLUSIVE.
+userdata.mkdir(parents=True, exist_ok=True)
+if lock_path.exists() and (lock_path.stat().st_mode & 0o600) != 0o600:
+    os.chmod(lock_path, 0o644)
+lock_db = sqlite3.connect(str(lock_path), isolation_level=None)
+try:
+    lock_db.execute("PRAGMA busy_timeout = 500")
+    try:
+        lock_db.execute("BEGIN EXCLUSIVE")
+    except sqlite3.OperationalError as exc:
+        raise SystemExit(f"another T3 server still holds {lock_path.name}: {exc}")
+
+    # Also reject older pre-lock T3 servers recorded in server-runtime.json (serverOwnership.ts).
+    runtime_path = userdata / "server-runtime.json"
+    if runtime_path.exists():
+        try:
+            runtime_state = json.loads(runtime_path.read_text(encoding="utf-8"))
+        except Exception:
+            runtime_state = None
+        if isinstance(runtime_state, dict) and runtime_state.get("ownerId") is None:
+            legacy_pid = runtime_state.get("pid")
+            if isinstance(legacy_pid, int) and not isinstance(legacy_pid, bool) and legacy_pid > 0:
+                try:
+                    os.kill(legacy_pid, 0)
+                    raise SystemExit(f"legacy T3 server (pid {legacy_pid}) is still running")
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    raise SystemExit(f"legacy T3 server (pid {legacy_pid}) is still running")
+
+    post_runs = read_runs()
+    if check_active and post_runs is not None:
+        active_after = sum(1 for status in post_runs.values() if status in ACTIVE_STATUSES)
+        if active_after > 0:
+            sys.stderr.write(f"ACTIVE_RUNS:{active_after}\n")
+            raise SystemExit(42)
+        baseline = pre_runs or {}
+        raced = sum(
+            1
+            for run_id, post_status in post_runs.items()
+            if baseline.get(run_id) != post_status
+        )
+        if raced > 0:
+            sys.stderr.write(f"ACTIVE_RUNS:{raced}\n")
+            raise SystemExit(42)
+
+    sys.stdout.write("FENCED\n")
+    sys.stdout.flush()
+    if hold_lock:
+        stopping = False
+        def _stop(_sig, _frame):
+            global stopping
+            stopping = True
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        signal.signal(signal.SIGHUP, _stop)
+        poller = None
+        try:
+            poller = select.poll()
+            poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        except (AttributeError, OSError, ValueError):
+            poller = None
+        deadline = time.monotonic() + 2100
+        while not stopping and time.monotonic() < deadline:
+            if poller is not None:
+                events = poller.poll(250)
+                if any(ev & (select.POLLERR | select.POLLHUP) for _, ev in events):
+                    break
+            else:
+                time.sleep(0.25)
+            # Non-PTY ssh disconnects (e.g. Coder agentssh) do not deliver SIGHUP; a periodic
+            # stdout write triggers BrokenPipeError immediately once the SSH channel closes.
+            try:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError):
+                break
+finally:
+    try:
+        lock_db.execute("ROLLBACK")
+    except Exception:
+        pass
+    lock_db.close()
+`;
+
+/**
+ * Exports all non-deleted V2 thread projections (plus deleted ancestor threads still referenced by
+ * live run-forks) and active project metadata from a devbox's statev2.sqlite as gzipped JSON on
+ * stdout inside a single read-only snapshot transaction.
+ * Pass `--check-active` to exit 42 if any run is still preparing/queued/starting/running/waiting.
+ */
+export const EXPORT_THREADS_SCRIPT = String.raw`import gzip, hashlib, io, json, os, pathlib, sqlite3, subprocess, sys
+
+MAX_ATTACHMENT_HASH_BYTES = 50 * 1024 * 1024
+CORE_V2_TABLES = {
+    "orchestration_v2_projection_threads",
+    "orchestration_v2_projection_runs",
+    "orchestration_v2_projection_run_attempts",
+    "orchestration_v2_projection_nodes",
+    "orchestration_v2_projection_messages",
+    "orchestration_v2_projection_turn_items",
+}
+
+check_active = "--check-active" in sys.argv[1:]
+userdata = pathlib.Path(os.path.expanduser("~/.t3/userdata"))
+db_path = userdata / "statev2.sqlite"
+attachments_dir = userdata / "attachments"
+
+def write_out(payload):
+    with gzip.GzipFile(fileobj=sys.stdout.buffer, mode="wb") as gz:
+        with io.TextIOWrapper(gz, encoding="utf-8") as writer:
+            json.dump(payload, writer, separators=(",", ":"))
+    sys.stdout.buffer.flush()
+
+if not db_path.exists():
+    write_out({"missing": True, "schemaMissing": False, "projects": [], "threads": [], "attachmentFiles": {}, "invalidAttachmentFiles": []})
+    raise SystemExit(0)
+
+db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=15, isolation_level=None)
+db.execute("BEGIN DEFERRED")
+try:
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not CORE_V2_TABLES.issubset(tables):
+        write_out({"missing": False, "schemaMissing": True, "projects": [], "threads": [], "attachmentFiles": {}, "invalidAttachmentFiles": []})
+        raise SystemExit(0)
+
+    if check_active:
+        row = db.execute(
+            "SELECT COUNT(*) FROM orchestration_v2_projection_runs WHERE status IN ('preparing', 'queued', 'starting', 'running', 'waiting')"
+        ).fetchone()
+        active_count = int(row[0]) if row else 0
+        if active_count > 0:
+            sys.stderr.write(f"ACTIVE_RUNS:{active_count}\n")
+            raise SystemExit(42)
+
+    def git_remote_url(cwd):
+        if not cwd or not os.path.isdir(cwd):
+            return None
+        for remote in ("upstream", "origin"):
+            try:
+                res = subprocess.run(
+                    ["git", "-C", cwd, "remote", "get-url", remote],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                url = res.stdout.strip()
+                if res.returncode == 0 and url:
+                    return url
+            except Exception:
+                continue
+        return None
+
+    projects = []
+    if "projection_projects" in tables:
+        for project_id, title, workspace_root in db.execute(
+            "SELECT project_id, title, workspace_root FROM projection_projects WHERE deleted_at IS NULL"
+        ):
+            projects.append({
+                "projectId": project_id,
+                "title": title,
+                "workspaceRoot": workspace_root,
+                "remoteUrl": git_remote_url(workspace_root),
+            })
+
+    thread_columns = {row[1] for row in db.execute("PRAGMA table_info(orchestration_v2_projection_threads)")}
+    raw_fork_col = "th.fork_run_ids_json" if "fork_run_ids_json" in thread_columns else "NULL"
+    # Materialize effective membership for legacy forks whose fork_run_ids_json is NULL using
+    # the same timestamp fallback as ProjectionStore.getForkSourceRunIds, so runs rolled back
+    # after the fork are never dropped on import.
+    effective_fork_col = f"""
+        CASE
+            WHEN json_valid(th.payload_json) AND json_extract(th.payload_json, '$.forkedFrom.type') = 'run' THEN
+                COALESCE({raw_fork_col}, (
+                    SELECT json_group_array(run.run_id)
+                    FROM orchestration_v2_projection_runs AS run
+                    WHERE run.thread_id = json_extract(th.payload_json, '$.forkedFrom.threadId')
+                      AND run.ordinal <= (
+                          SELECT ordinal FROM orchestration_v2_projection_runs
+                          WHERE run_id = json_extract(th.payload_json, '$.forkedFrom.runId')
+                      )
+                      AND NOT COALESCE(
+                          run.status = 'rolled_back' AND julianday(run.completed_at) < julianday(th.created_at), 0
+                      )
+                ))
+            ELSE {raw_fork_col}
+        END
+    """
+
+    # Include live threads plus any deleted ancestor thread still referenced by a live run-fork.
+    # Side chats show only their own rows (ProjectionStore.inheritedRunFork), so stop at sideChat.
+    selected_cte = """
+        WITH RECURSIVE selected_threads(thread_id) AS (
+            SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
+            UNION
+            SELECT json_extract(child.payload_json, '$.forkedFrom.threadId')
+            FROM orchestration_v2_projection_threads AS child
+            INNER JOIN selected_threads AS st ON st.thread_id = child.thread_id
+            WHERE json_valid(child.payload_json)
+              AND json_extract(child.payload_json, '$.forkedFrom.type') = 'run'
+              AND json_extract(child.payload_json, '$.forkedFrom.threadId') IS NOT NULL
+              AND COALESCE(json_extract(child.payload_json, '$.lineage.sideChat'), 0) != 1
+        )
+    """
+    selected_rows = db.execute(
+        f"{selected_cte} "
+        f"SELECT th.thread_id, th.payload_json, {effective_fork_col} "
+        f"FROM orchestration_v2_projection_threads AS th "
+        f"INNER JOIN selected_threads AS st ON st.thread_id = th.thread_id "
+        f"ORDER BY th.created_at ASC, th.thread_id ASC"
+    ).fetchall()
+    selected_ids = {row[0] for row in selected_rows}
+
+    def by_column(table, key_col, order_sql):
+        if table not in tables or not selected_ids:
+            return {}
+        grouped = {}
+        for thread_id, payload_json in db.execute(
+            f"{selected_cte} "
+            f"SELECT t.{key_col}, t.payload_json FROM {table} AS t "
+            f"INNER JOIN selected_threads AS st ON st.thread_id = t.{key_col} "
+            f"ORDER BY {order_sql}"
+        ):
+            grouped.setdefault(thread_id, []).append(payload_json)
+        return grouped
+
+    runs_by_thread = by_column("orchestration_v2_projection_runs", "thread_id", "t.ordinal ASC, t.run_id ASC")
+    attempts_by_thread = by_column("orchestration_v2_projection_run_attempts", "thread_id", "t.attempt_ordinal ASC, t.attempt_id ASC")
+    nodes_by_thread = by_column("orchestration_v2_projection_nodes", "thread_id", "t.node_id ASC")
+    subagents_by_thread = by_column("orchestration_v2_projection_subagents", "thread_id", "t.updated_at ASC, t.subagent_id ASC")
+    messages_by_thread = by_column("orchestration_v2_projection_messages", "thread_id", "t.created_at ASC, t.message_id ASC")
+    plans_by_thread = by_column("orchestration_v2_projection_plans", "thread_id", "t.plan_id ASC")
+    handoffs_by_thread = by_column("orchestration_v2_projection_context_handoffs", "thread_id", "t.updated_at ASC, t.context_handoff_id ASC")
+    transfers_by_thread = by_column("orchestration_v2_projection_context_transfers", "target_thread_id", "t.updated_at ASC, t.context_transfer_id ASC")
+
+    turn_items_by_thread = {}
+    if selected_ids:
+        if "orchestration_v2_turn_item_positions" in tables:
+            query = f"""
+                {selected_cte}
+                SELECT item.thread_id, item.payload_json
+                FROM orchestration_v2_projection_turn_items AS item
+                INNER JOIN selected_threads AS st ON st.thread_id = item.thread_id
+                LEFT JOIN orchestration_v2_turn_item_positions AS pos
+                  ON pos.thread_id = item.thread_id AND pos.turn_item_id = item.turn_item_id
+                ORDER BY COALESCE(pos.ordinal, item.ordinal) ASC, item.turn_item_id ASC
+            """
+        else:
+            query = f"""
+                {selected_cte}
+                SELECT item.thread_id, item.payload_json
+                FROM orchestration_v2_projection_turn_items AS item
+                INNER JOIN selected_threads AS st ON st.thread_id = item.thread_id
+                ORDER BY item.ordinal ASC, item.turn_item_id ASC
+            """
+        for thread_id, payload_json in db.execute(query):
+            turn_items_by_thread.setdefault(thread_id, []).append(payload_json)
+
+    deleted_thread_ids = [
+        row[0]
+        for row in db.execute(
+            "SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NOT NULL"
+        )
+    ]
+    unhydrated_legacy_thread_ids = []
+    if "orchestration_v2_legacy_imports" in tables and selected_ids:
+        unhydrated_legacy_thread_ids = [
+            row[0]
+            for row in db.execute(
+                f"{selected_cte} "
+                "SELECT li.thread_id FROM orchestration_v2_legacy_imports AS li "
+                "INNER JOIN selected_threads AS st ON st.thread_id = li.thread_id "
+                "WHERE li.transcript_imported_at IS NULL"
+            )
+        ]
+    # Also detect live V1 legacy threads whose V2 shells have not been created yet at startup.
+    if "projection_threads" in tables:
+        unimported_legacy = [
+            row[0]
+            for row in db.execute(
+                "SELECT thread_id FROM projection_threads "
+                "WHERE deleted_at IS NULL "
+                "AND thread_id NOT IN (SELECT thread_id FROM orchestration_v2_projection_threads)"
+            )
+        ]
+        if unimported_legacy:
+            unhydrated_legacy_thread_ids = sorted(
+                set(unhydrated_legacy_thread_ids) | set(unimported_legacy)
+            )
+
+    threads = []
+    for thread_id, payload_json, fork_run_ids_json in selected_rows:
+        threads.append({
+            "thread": payload_json,
+            "forkRunIdsJson": fork_run_ids_json,
+            "runs": runs_by_thread.get(thread_id, []),
+            "attempts": attempts_by_thread.get(thread_id, []),
+            "nodes": nodes_by_thread.get(thread_id, []),
+            "subagents": subagents_by_thread.get(thread_id, []),
+            "messages": messages_by_thread.get(thread_id, []),
+            "plans": plans_by_thread.get(thread_id, []),
+            "turnItems": turn_items_by_thread.get(thread_id, []),
+            "contextHandoffs": handoffs_by_thread.get(thread_id, []),
+            "contextTransfers": transfers_by_thread.get(thread_id, []),
+        })
+finally:
+    try:
+        db.execute("ROLLBACK")
+    except Exception:
+        pass
+    db.close()
+
+def file_sha256(file_path):
+    h = hashlib.sha256()
+    with open(file_path, "rb") as fh:
+        while True:
+            chunk = fh.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+attachment_files = {}
+invalid_attachment_files = []
+if attachments_dir.is_dir():
+    for entry in sorted(attachments_dir.iterdir(), key=lambda p: p.name):
+        if entry.is_symlink() or not entry.is_file():
+            invalid_attachment_files.append(entry.name)
+            continue
+        try:
+            size = entry.stat().st_size
+            digest = file_sha256(entry) if size <= MAX_ATTACHMENT_HASH_BYTES else None
+            attachment_files[entry.name] = {"size": size, "sha256": digest}
+        except OSError:
+            attachment_files[entry.name] = {"size": -1, "sha256": None}
+
+write_out({
+    "missing": False,
+    "schemaMissing": False,
+    "projects": projects,
+    "threads": threads,
+    "deletedThreadIds": deleted_thread_ids,
+    "unhydratedLegacyThreadIds": unhydrated_legacy_thread_ids,
+    "attachmentFiles": attachment_files,
+    "invalidAttachmentFiles": invalid_attachment_files,
+})
+`;
+
+/**
+ * Reads a JSON array of attachment filenames from stdin and writes gzipped NDJSON records
+ * (`{"name": ..., "size": ..., "sha256": ..., "b64": ...}`) for regular files under
+ * `~/.t3/userdata/attachments` to stdout. Fails non-zero on any invalid, missing, symlinked,
+ * or oversized file so no attachment can be silently omitted.
+ */
+export const EXPORT_ATTACHMENTS_SCRIPT = String.raw`import base64, errno, gzip, hashlib, json, os, pathlib, stat, sys
+
+MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_BATCH_BYTES = 64 * 1024 * 1024
+
+attachments_dir = pathlib.Path(os.path.expanduser("~/.t3/userdata/attachments")).resolve()
+requested = json.load(sys.stdin)
+if not isinstance(requested, list):
+    raise SystemExit("attachment request must be a JSON list")
+
+total = 0
+open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+
+with gzip.GzipFile(fileobj=sys.stdout.buffer, mode="wb") as gz:
+    for name in requested:
+        if not isinstance(name, str) or not name or "/" in name or "\\" in name or "\x00" in name or name in (".", ".."):
+            raise SystemExit(f"invalid attachment filename: {name!r}")
+        candidate = attachments_dir / name
+        try:
+            fd = os.open(candidate, open_flags)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise SystemExit(f"refusing symlink attachment: {name}")
+            raise SystemExit(f"could not open attachment {name}: {exc}")
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise SystemExit(f"attachment is not a regular file: {name}")
+            if st.st_size > MAX_FILE_BYTES:
+                raise SystemExit(f"attachment {name} exceeds {MAX_FILE_BYTES} bytes ({st.st_size})")
+            if total + st.st_size > MAX_BATCH_BYTES:
+                raise SystemExit(f"attachment batch exceeds {MAX_BATCH_BYTES} bytes")
+            with os.fdopen(fd, "rb") as fh:
+                fd = -1
+                data = fh.read(MAX_FILE_BYTES + 1)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        if len(data) > MAX_FILE_BYTES:
+            raise SystemExit(f"attachment {name} grew beyond {MAX_FILE_BYTES} bytes")
+        if total + len(data) > MAX_BATCH_BYTES:
+            raise SystemExit(f"attachment batch grew beyond {MAX_BATCH_BYTES} bytes")
+        total += len(data)
+        digest = hashlib.sha256(data).hexdigest()
+        line = json.dumps(
+            {"name": name, "size": len(data), "sha256": digest, "b64": base64.b64encode(data).decode("ascii")},
+            separators=(",", ":"),
+        ) + "\n"
+        gz.write(line.encode("utf-8"))
+sys.stdout.buffer.flush()
 `;
 
 const NAME_ADJECTIVES = [
@@ -752,13 +1236,16 @@ function provisionRevision(script: string): string {
 }
 
 export const PROVISION_REVISION = provisionRevision(PROVISION_SCRIPT);
-// Readiness timeouts only change the probe, so already-provisioned boxes can reconnect directly.
-const previousProvisionRevision = provisionRevision(
-  PROVISION_SCRIPT.replace(PROVISION_READINESS_CURL_TIMEOUTS, ""),
-);
+// Readiness timeouts and delete-unseal only change probes/recovery, so already-provisioned boxes can reconnect directly.
+const preUnsealProvisionScript = PROVISION_SCRIPT.replace(PROVISION_UNSEAL_SNIPPET, "");
+const compatibleProvisionRevisions = new Set([
+  PROVISION_REVISION,
+  provisionRevision(preUnsealProvisionScript),
+  provisionRevision(preUnsealProvisionScript.replace(PROVISION_READINESS_CURL_TIMEOUTS, "")),
+]);
 
 export function isCurrentProvisionRevision(revision: string | undefined): boolean {
-  return revision === PROVISION_REVISION || revision === previousProvisionRevision;
+  return revision !== undefined && compatibleProvisionRevisions.has(revision);
 }
 
 /** A Coder workspace build, as `/api/v2/workspaces/{id}/builds` returns it (newest first). */

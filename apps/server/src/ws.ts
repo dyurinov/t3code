@@ -2861,13 +2861,18 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.devboxesList]: (_input) =>
           Effect.all([devboxes.list, devboxes.logins, devboxes.deleted]).pipe(
-            Effect.map(([list, logins, deleted]) => ({ devboxes: list, logins, deleted })),
+            Effect.map(([list, logins, deleted]) => ({
+              devboxes: list,
+              logins,
+              deleted,
+              migratesThreadsOnDelete: true,
+            })),
           ),
         [WS_METHODS.devboxesCreate]: (input) => devboxes.create(input),
         [WS_METHODS.devboxesWake]: ({ name }) => devboxes.wake(name),
         [WS_METHODS.devboxesStop]: ({ name }) => devboxes.stop(name),
-        [WS_METHODS.devboxesDelete]: ({ name, force }) =>
-          devboxes.remove(name, { force: force ?? false }).pipe(Effect.as({ name, deleted: true })),
+        [WS_METHODS.devboxesDelete]: ({ name, force, skipMigration }) =>
+          devboxes.remove(name, { force: force ?? false, skipMigration: skipMigration ?? false }),
         [WS_METHODS.devboxesPairClient]: ({ name }) => devboxes.pairClient(name),
         [WS_METHODS.devboxesClaim]: (_input) => devboxes.claim,
         [WS_METHODS.devboxesStartLogin]: ({ provider }) => devboxes.startLogin(provider),

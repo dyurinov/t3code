@@ -63,6 +63,7 @@ export class DevboxError extends Schema.TaggedError<DevboxError>()("DevboxError"
     "coder",
     "provision",
     "link",
+    "migration",
     "storage",
   ]),
   message: Schema.String,
@@ -94,7 +95,14 @@ export const DevboxDeleteInput = Schema.Struct({
   name: TrimmedNonEmptyString.annotate({ description: "Box name from devbox_list." }),
   force: Schema.optionalKey(
     Schema.Boolean.annotate({
-      description: "Delete even with a running turn. Unpushed work on the box is lost.",
+      description:
+        "Delete even with a running turn or if threads cannot be copied off the box. Unpushed work on the box is lost.",
+    }),
+  ),
+  skipMigration: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description:
+        "Skip copying threads from the box before deleting (only used when force-deleting after an earlier migration attempt failed).",
     }),
   ),
 });
@@ -141,13 +149,21 @@ export const DevboxListResult = Schema.Struct({
   devboxes: Schema.Array(DevboxSummary),
   logins: Schema.Array(DevboxLogin),
   deleted: Schema.Array(DeletedDevbox),
+  migratesThreadsOnDelete: Schema.optionalKey(Schema.Boolean),
 });
 export type DevboxListResult = typeof DevboxListResult.Type;
 
 export const DevboxLoginInput = Schema.Struct({ provider: DevboxLoginProvider });
 export type DevboxLoginInput = typeof DevboxLoginInput.Type;
 
-export const DevboxDeleteResult = Schema.Struct({ name: Schema.String, deleted: Schema.Boolean });
+export const DevboxDeleteResult = Schema.Struct({
+  name: Schema.String,
+  deleted: Schema.Boolean,
+  migratedThreads: Schema.optionalKey(Schema.Number),
+  skippedThreads: Schema.optionalKey(Schema.Number),
+  migratedAttachments: Schema.optionalKey(Schema.Number),
+  migrationWarning: Schema.optionalKey(Schema.String),
+});
 export type DevboxDeleteResult = typeof DevboxDeleteResult.Type;
 
 /** What a client needs to connect to a devbox directly: its loopback URL and a one-time code. */

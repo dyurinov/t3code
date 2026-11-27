@@ -15,6 +15,7 @@ import {
   type DeletedDevbox,
   type DevboxClientPairing,
   type DevboxCreateInput,
+  type DevboxDeleteResult,
   type DevboxLogin,
   type DevboxLoginProvider,
   type DevboxCredentialState,
@@ -35,8 +36,11 @@ import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FiberMap from "effect/FiberMap";
 import * as FiberSet from "effect/FiberSet";
 import * as FileSystem from "effect/FileSystem";
@@ -63,10 +67,12 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ProviderCredentialStore from "../provider/ProviderCredentialStore.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as DevboxLogins from "./DevboxLogins.ts";
+import * as DevboxThreadMigration from "./DevboxThreadMigration.ts";
 import * as DevboxVertexMetadata from "./DevboxVertexMetadata.ts";
 import { environmentRpc } from "./devboxRpc.ts";
 import {
   ACTIVE_RUN_SCRIPT,
+  FENCE_T3_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
   INSTALL_CURSOR_SCRIPT,
   INSTALL_PERSONALIZATION_SCRIPT,
@@ -208,8 +214,8 @@ export class DevboxService extends Context.Service<
     readonly stop: (name: string) => Effect.Effect<DevboxSummary, DevboxError>;
     readonly remove: (
       name: string,
-      options: { readonly force: boolean },
-    ) => Effect.Effect<void, DevboxError>;
+      options: { readonly force: boolean; readonly skipMigration?: boolean },
+    ) => Effect.Effect<DevboxDeleteResult, DevboxError>;
     /**
      * Takes a prepared spare (or creates a box when there is none), wakes and links it, and
      * returns a one-time code for this client. Starts preparing the next spare.
@@ -256,6 +262,7 @@ export const make = Effect.gen(function* () {
   const peerLinks = yield* PeerLinks.PeerLinks;
   const auth = yield* EnvironmentAuth.EnvironmentAuth;
   const logins = yield* DevboxLogins.DevboxLogins;
+  const threadMigration = yield* DevboxThreadMigration.DevboxThreadMigration;
   const vertexMetadata = yield* DevboxVertexMetadata.DevboxVertexMetadata;
   const settings = yield* ServerSettingsService.ServerSettingsService;
   const secrets = yield* SecretResolver.SecretResolver;
@@ -441,6 +448,83 @@ export const make = Effect.gen(function* () {
       ...(stdin === undefined ? {} : { stdin }),
       timeout: timeout ?? "5 minutes",
     }).pipe(Effect.mapError(devboxError("provision")));
+
+  const MAX_SSH_BINARY_BYTES = 256 * 1024 * 1024;
+  const sshBinary = Effect.fn("DevboxService.sshBinary")(function* (
+    name: string,
+    remote: string,
+    options?: { readonly stdin?: string; readonly timeout?: Duration.Input },
+  ) {
+    const chunks: Array<Uint8Array> = [];
+    let totalBytes = 0;
+    let overflow = false;
+    const overflowSignal = yield* Deferred.make<never, DevboxError>();
+    const runProcess = runner
+      .run({
+        command: "ssh",
+        args: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=30", `coder.${name}`, remote],
+        ...(options?.stdin === undefined ? {} : { stdin: options.stdin }),
+        timeout: options?.timeout ?? "5 minutes",
+        env: { BROWSER: browserFilter },
+        maxOutputBytes: 4096,
+        outputMode: "truncate",
+        onStdoutChunk: (chunk) => {
+          if (overflow) return;
+          totalBytes += chunk.byteLength;
+          if (totalBytes > MAX_SSH_BINARY_BYTES) {
+            overflow = true;
+            chunks.length = 0;
+            Deferred.doneUnsafe(
+              overflowSignal,
+              Effect.fail(
+                devboxError("migration")(
+                  `ssh output from ${name} exceeded ${MAX_SSH_BINARY_BYTES} bytes.`,
+                ),
+              ),
+            );
+            return;
+          }
+          chunks.push(chunk.slice());
+        },
+      })
+      .pipe(Effect.mapError(devboxError("provision")));
+
+    const result = yield* Effect.raceFirst(runProcess, Deferred.await(overflowSignal));
+    if (overflow) {
+      return yield* new DevboxError({
+        reason: "migration",
+        message: `ssh output from ${name} exceeded ${MAX_SSH_BINARY_BYTES} bytes.`,
+      });
+    }
+    if (result.code !== 0) {
+      const stderr = result.stderr
+        .split("\n")
+        .filter((line) => !SSH_NOISE.test(line))
+        .join("\n")
+        .trim()
+        .slice(-800);
+      if (result.code === 42 && stderr.includes("ACTIVE_RUNS:")) {
+        return yield* new DevboxError({
+          reason: "busy",
+          message: `${name} has an active turn. Stop it first, or delete with force.`,
+        });
+      }
+      return yield* new DevboxError({
+        reason: "provision",
+        message: stderr
+          ? `ssh ${name} exited with ${String(result.code)}: ${stderr}`
+          : `ssh ${name} exited with ${String(result.code)}.`,
+      });
+    }
+    const combined = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    chunks.length = 0;
+    return combined;
+  });
 
   const workspaces = coder(["list", "--output", "json"], "1 minute").pipe(
     Effect.flatMap((stdout) =>
@@ -1689,7 +1773,11 @@ export const make = Effect.gen(function* () {
           }).pipe(Effect.andThen(scheduleAntigravitySync(record, false))),
         ),
         Effect.tapError((error) =>
-          setTransient(stored.name, { state: "failed", lastError: error.message }),
+          FiberMap.remove(tunnels, stored.name).pipe(
+            Effect.andThen(
+              setTransient(stored.name, { state: "failed", lastError: error.message }),
+            ),
+          ),
         ),
       ),
   );
@@ -1823,6 +1911,22 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // An autoupdating box moves to the template's latest version, which requires the marker
+  // z devbox create sends; a default is ignored by templates without it, and is only used
+  // rather than prompted for with --use-parameter-defaults.
+  const startWorkspace = (name: string) =>
+    coder(
+      [
+        "start",
+        name,
+        "--yes",
+        "--use-parameter-defaults",
+        "--parameter-default",
+        "created_via=z-devbox",
+      ],
+      "15 minutes",
+    );
+
   /** Starts the box and reconnects it, returning once it answers here. */
   const wakeNow = Effect.fn("DevboxService.wakeNow")(function* (name: string) {
     const record = yield* getRecord(name);
@@ -1831,25 +1935,18 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* setTransient(name, { state: "starting", lastError: null });
         const workspace = (yield* workspaces).get(name);
+        if (workspace?.latest_build.status === "deleting") {
+          return yield* new DevboxError({
+            reason: "busy",
+            message: `${name} is currently being deleted.`,
+          });
+        }
         if (workspace?.latest_build.status !== "running") {
           pushedCursorKeys.delete(name);
           pushedAntigravity.delete(name);
           yield* FiberMap.remove(antigravitySyncs, name);
           yield* FiberMap.remove(vertexTunnels, name);
-          // An autoupdating box moves to the template's latest version, which requires the
-          // marker z devbox create sends; a default is ignored by templates without it, and
-          // is only used rather than prompted for with --use-parameter-defaults.
-          yield* coder(
-            [
-              "start",
-              name,
-              "--yes",
-              "--use-parameter-defaults",
-              "--parameter-default",
-              "created_via=z-devbox",
-            ],
-            "15 minutes",
-          );
+          yield* startWorkspace(name);
         }
         yield* connect(record);
       }).pipe(
@@ -1864,6 +1961,12 @@ export const make = Effect.gen(function* () {
   // Waking takes minutes; callers follow the box's state instead of holding a request open.
   const wake: DevboxService["Service"]["wake"] = Effect.fn("DevboxService.wake")(function* (name) {
     yield* getRecord(name);
+    if ((yield* Ref.get(transient)).get(name)?.state === "deleting") {
+      return yield* new DevboxError({
+        reason: "busy",
+        message: `${name} is currently being deleted.`,
+      });
+    }
     yield* setTransient(name, { state: "starting", lastError: null });
     yield* FiberMap.run(creations, name, wakeNow(name).pipe(Effect.ignore), {
       onlyIfMissing: true,
@@ -1874,6 +1977,12 @@ export const make = Effect.gen(function* () {
   // Stopping takes about a minute; callers follow the box's state instead of waiting.
   const stop: DevboxService["Service"]["stop"] = Effect.fn("DevboxService.stop")(function* (name) {
     yield* getRecord(name);
+    if ((yield* Ref.get(transient)).get(name)?.state === "deleting") {
+      return yield* new DevboxError({
+        reason: "busy",
+        message: `${name} is currently being deleted.`,
+      });
+    }
     yield* setTransient(name, { state: "stopping", lastError: null });
     yield* FiberMap.run(
       creations,
@@ -1902,50 +2011,424 @@ export const make = Effect.gen(function* () {
       Effect.map((stdout) => stdout.trim().endsWith("1")),
     );
 
+  const fenceLostError = (name: string, error?: DevboxError) =>
+    error?.reason === "busy"
+      ? error
+      : new DevboxError({
+          reason: "migration",
+          message: error
+            ? `Lost write fence on ${name} before deleting: ${error.message}`
+            : `Lost write fence on ${name} before deleting; retry to ensure no new turns were missed.`,
+        });
+
+  // Stops t3code.service and holds remote server-owner.sqlite in a scoped SSH fiber.
+  // Outer uninterruptibleMask + addFinalizer (not acquireRelease) keeps the pre-FENCED wait interruptible.
+  const acquireRemoteT3Fence = (name: string, rejectActiveRuns: boolean) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const fenced = yield* Deferred.make<void, DevboxError>();
+        const lost = yield* Deferred.make<DevboxError>();
+        const decoder = new TextDecoder();
+        let stdoutBuf = "";
+        const command = rejectActiveRuns ? "python3 - --check-active --hold" : "python3 - --hold";
+        const fenceRun = runner
+          .run({
+            command: "ssh",
+            args: [
+              "-o",
+              "BatchMode=yes",
+              "-o",
+              "ConnectTimeout=30",
+              "-o",
+              "ServerAliveInterval=15",
+              "-o",
+              "ServerAliveCountMax=3",
+              `coder.${name}`,
+              command,
+            ],
+            stdin: FENCE_T3_SCRIPT,
+            timeout: "35 minutes",
+            env: { BROWSER: browserFilter },
+            maxOutputBytes: 4096,
+            outputMode: "truncate",
+            onStdoutChunk: (chunk) => {
+              if (Deferred.isDoneUnsafe(fenced)) return;
+              stdoutBuf += decoder.decode(chunk, { stream: true });
+              if (stdoutBuf.includes("FENCED\n")) {
+                Deferred.doneUnsafe(fenced, Effect.void);
+              }
+            },
+          })
+          .pipe(
+            Effect.mapError(devboxError("provision")),
+            Effect.flatMap((result) => {
+              const stderr = result.stderr
+                .split("\n")
+                .filter((line) => !SSH_NOISE.test(line))
+                .join("\n")
+                .trim()
+                .slice(-800);
+              if (result.code === 42 && stderr.includes("ACTIVE_RUNS:")) {
+                return Effect.fail(
+                  new DevboxError({
+                    reason: "busy",
+                    message: `${name} has an active turn. Stop it first, or delete with force.`,
+                  }),
+                );
+              }
+              if (result.code !== 0) {
+                return Effect.fail(
+                  new DevboxError({
+                    reason: "provision",
+                    message: stderr
+                      ? `ssh ${name} fence exited with ${String(result.code)}: ${stderr}`
+                      : `ssh ${name} fence exited with ${String(result.code)}.`,
+                  }),
+                );
+              }
+              if (!Deferred.isDoneUnsafe(fenced)) {
+                return Effect.fail(
+                  new DevboxError({
+                    reason: "migration",
+                    message: `ssh ${name} fence exited before confirming lock acquisition.`,
+                  }),
+                );
+              }
+              return Effect.void;
+            }),
+            Effect.tapError((error) =>
+              Effect.sync(() => {
+                Deferred.doneUnsafe(fenced, Effect.fail(error));
+                Deferred.doneUnsafe(lost, Effect.succeed(fenceLostError(name, error)));
+              }),
+            ),
+            Effect.ensuring(
+              Effect.sync(() => {
+                Deferred.doneUnsafe(lost, Effect.succeed(fenceLostError(name)));
+              }),
+            ),
+          );
+
+        const fiber = yield* Effect.forkChild(fenceRun);
+        yield* Effect.addFinalizer(() => Fiber.interrupt(fiber));
+        yield* restore(
+          Effect.raceFirst(Deferred.await(fenced), Fiber.join(fiber)).pipe(
+            Effect.timeoutOrElse({
+              duration: "2 minutes",
+              orElse: () =>
+                Effect.fail(
+                  new DevboxError({
+                    reason: "migration",
+                    message: `Timed out waiting to fence ${name} before deleting.`,
+                  }),
+                ),
+            }),
+          ),
+        ).pipe(
+          Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : Fiber.interrupt(fiber))),
+        );
+        return { fiber, lost };
+      }),
+    );
+
+  // Verifies the fence lock is still held, moves ~/.config/systemd/user/t3code.service aside
+  // (avoiding shadowed --runtime masks), and chmods server-owner.sqlite to 000 so no T3 server
+  // can start while `coder delete` tears down the workspace.
+  const sealRemoteT3ForDelete = (name: string) =>
+    ssh(
+      name,
+      `set -eu; export XDG_RUNTIME_DIR="/run/user/$(id -u)"; python3 -c 'import os, sqlite3, sys; p = os.path.expanduser("~/.t3/userdata/server-owner.sqlite"); db = sqlite3.connect(p, isolation_level=None); db.execute("PRAGMA busy_timeout = 0");
+try:
+    db.execute("BEGIN EXCLUSIVE")
+except sqlite3.OperationalError as exc:
+    if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+        sys.exit(0)
+    raise
+db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer held")'; unit="$HOME/.config/systemd/user/t3code.service"; if [ -f "$unit" ]; then mv "$unit" "$unit.t3-sealed"; systemctl --user daemon-reload; fi; chmod 000 "$HOME/.t3/userdata/server-owner.sqlite"`,
+      undefined,
+      "1 minute",
+    );
+
+  const unsealRemoteT3 = (name: string) =>
+    ssh(
+      name,
+      'set -eu; export XDG_RUNTIME_DIR="/run/user/$(id -u)"; unit="$HOME/.config/systemd/user/t3code.service"; if [ -f "$unit.t3-sealed" ]; then mv "$unit.t3-sealed" "$unit"; systemctl --user daemon-reload; fi; if [ -e "$HOME/.t3/userdata/server-owner.sqlite" ]; then chmod 0644 "$HOME/.t3/userdata/server-owner.sqlite"; fi',
+      undefined,
+      "1 minute",
+    );
+
+  const startRemoteT3Service = (name: string) =>
+    ssh(
+      name,
+      'set -eu; export XDG_RUNTIME_DIR="/run/user/$(id -u)"; unit="$HOME/.config/systemd/user/t3code.service"; if [ -f "$unit.t3-sealed" ]; then mv "$unit.t3-sealed" "$unit"; systemctl --user daemon-reload; fi; if [ -e "$HOME/.t3/userdata/server-owner.sqlite" ]; then chmod 0644 "$HOME/.t3/userdata/server-owner.sqlite"; fi; load_state=$(systemctl --user show -p LoadState --value t3code.service); if [ "$load_state" = "loaded" ]; then systemctl --user start t3code.service; fi',
+      undefined,
+      "1 minute",
+    );
+
+  const isInFlightCoderBuild = (status: string | undefined) =>
+    status === "starting" ||
+    status === "stopping" ||
+    status === "pending" ||
+    status === "canceling";
+
+  const isSafeToReopenAfterDeleteFailure = (status: string | undefined) =>
+    status === "running" || status === "stopped" || status === "failed" || status === "canceled";
+
   const remove: DevboxService["Service"]["remove"] = Effect.fn("DevboxService.remove")(
     function* (name, options) {
-      const record = yield* getRecord(name);
+      if (options.skipMigration && !options.force) {
+        return yield* new DevboxError({
+          reason: "invalid",
+          message: "skipMigration requires force: true.",
+        });
+      }
+      yield* getRecord(name);
+      if (!options.force) {
+        const preflightStatus = (yield* workspaces).get(name)?.latest_build.status;
+        if (isInFlightCoderBuild(preflightStatus)) {
+          return yield* new DevboxError({
+            reason: "busy",
+            message: `${name} is currently ${preflightStatus}. Wait a moment and retry deleting so its threads can be copied safely, or delete with force.`,
+          });
+        }
+      }
       yield* FiberMap.remove(creations, name);
-      yield* locks.withLock(
+      return yield* locks.withLock(
         name,
         Effect.gen(function* () {
+          // Re-read inside the per-box lock so a concurrent create/connect/remove cannot leave
+          // us acting on a stale environmentId or an already-deleted record.
+          const record = yield* getRecord(name);
           const workspace = (yield* workspaces).get(name);
-          if (!options.force && workspace?.latest_build.status === "running") {
-            const busy = yield* hasActiveRun(name).pipe(Effect.orElseSucceed(() => false));
-            if (busy)
-              return yield* new DevboxError({
-                reason: "busy",
-                message: `${name} has a turn running. Stop it first, or delete with force.`,
-              });
-          }
+          const status = workspace?.latest_build.status;
           yield* setTransient(name, { state: "deleting", lastError: null });
-          yield* FiberMap.remove(tunnels, name);
-          yield* FiberMap.remove(antigravitySyncs, name);
-          yield* FiberMap.remove(vertexTunnels, name);
-          if (record.environmentId !== null)
-            yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
-          yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
-          if (workspace !== undefined) {
-            yield* rememberDeleted(name, record.environmentId).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("devbox usage could not be kept", { name, cause }),
-              ),
-            );
-            yield* coder(["delete", name, "--yes"], "15 minutes");
-          }
-          pushed.delete(name);
-          pushedCursorKeys.delete(name);
-          pushedAntigravity.delete(name);
-          persistedAntigravityManaged.delete(name);
-          unboundBoxes.delete(name);
-          bindAttempts.delete(name);
-          yield* Ref.update(records, (current) => {
-            const next = new Map(current);
-            next.delete(name);
-            return next;
-          });
-          yield* save();
-          yield* setTransient(name, undefined);
+          let wokeForMigration = false;
+          let stoppedServiceForMigration = false;
+          let sealedForDelete = false;
+          let deleteSubmitted = false;
+          let deletedOnCoder = false;
+          return yield* Effect.scoped(
+            Effect.gen(function* () {
+              let migratedThreads = 0;
+              let skippedThreads = 0;
+              let migratedAttachments = 0;
+              let migrationWarning: string | undefined;
+              let activeFenceLost: Deferred.Deferred<DevboxError> | undefined;
+
+              const shouldMigrate =
+                workspace !== undefined &&
+                !(options.force && options.skipMigration) &&
+                status !== "deleting" &&
+                status !== "deleted";
+
+              if (shouldMigrate) {
+                // On force delete, skip waking only when the Coder workspace itself is failed;
+                // stopped boxes (e.g. after a stopped -> busy -> force retry) are still woken & copied.
+                if (options.force && status === "failed") {
+                  migrationWarning = `Skipped copying threads from ${name} because its workspace is failed and force delete was requested.`;
+                } else if (!options.force && isInFlightCoderBuild(status)) {
+                  return yield* new DevboxError({
+                    reason: "busy",
+                    message: `${name} is currently ${status}. Wait a moment and retry deleting so its threads can be copied safely, or delete with force.`,
+                  });
+                } else {
+                  const migrateEffect = Effect.gen(function* () {
+                    if (status !== "running" && status !== "starting") {
+                      // Mark before calling startWorkspace so an interrupt/timeout mid-start still stops the box.
+                      wokeForMigration = true;
+                      yield* startWorkspace(name);
+                    }
+                    yield* coder(["ssh", "--wait=no", name, "--", "true"], "5 minutes");
+                    // Mark before fencing so an interrupt/timeout mid-stop still restarts t3code.service.
+                    // The remote ownership lock stays held in this scope through coder delete.
+                    stoppedServiceForMigration = true;
+                    const fence = yield* acquireRemoteT3Fence(name, !options.force);
+                    activeFenceLost = fence.lost;
+                    return yield* Effect.raceFirst(
+                      threadMigration.migrateFromDevbox({
+                        name,
+                        expectDatabase: record.environmentId !== null,
+                        rejectActiveRuns: !options.force,
+                        runSshBinary: (remote, sshOptions) => sshBinary(name, remote, sshOptions),
+                      }),
+                      Deferred.await(fence.lost).pipe(Effect.flatMap(Effect.fail)),
+                    );
+                  });
+                  const migrationResult = yield* migrateEffect.pipe(
+                    Effect.map((result) => ({ ok: true as const, result })),
+                    Effect.catch((error) =>
+                      options.force
+                        ? Effect.logWarning(
+                            "devbox thread migration failed; continuing because force is set",
+                            {
+                              name,
+                              error: error.message,
+                            },
+                          ).pipe(
+                            Effect.as({
+                              ok: false as const,
+                              warning: `Could not copy threads from ${name}: ${error.message}`,
+                            }),
+                          )
+                        : error.reason === "busy"
+                          ? Effect.fail(error)
+                          : Effect.fail(
+                              new DevboxError({
+                                reason: "migration",
+                                message: `Could not copy threads from ${name} before deleting: ${error.message} Retry, or delete with force to discard its threads.`,
+                              }),
+                            ),
+                    ),
+                  );
+                  if (migrationResult.ok) {
+                    migratedThreads = migrationResult.result.migratedThreads;
+                    skippedThreads = migrationResult.result.skippedThreads;
+                    migratedAttachments = migrationResult.result.migratedAttachments;
+                    if (migrationResult.result.warning !== undefined) {
+                      migrationWarning = migrationResult.result.warning;
+                    }
+                  } else {
+                    migrationWarning = migrationResult.warning;
+                  }
+                }
+              }
+
+              let pendingDeletedHistory: DeletedDevboxRecord | undefined;
+              if (workspace !== undefined) {
+                pendingDeletedHistory = yield* collectDeletedRecord(
+                  name,
+                  record.environmentId,
+                  workspace.id,
+                ).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("devbox usage could not be kept", { name, cause }).pipe(
+                      Effect.as(undefined),
+                    ),
+                  ),
+                );
+                if (activeFenceLost !== undefined) {
+                  if (!options.force && Deferred.isDoneUnsafe(activeFenceLost)) {
+                    return yield* Deferred.await(activeFenceLost).pipe(Effect.flatMap(Effect.fail));
+                  }
+                  sealedForDelete = true;
+                  const sealEffect = sealRemoteT3ForDelete(name);
+                  if (options.force) {
+                    yield* sealEffect.pipe(Effect.ignore);
+                  } else {
+                    yield* sealEffect.pipe(
+                      Effect.mapError(
+                        (error) =>
+                          new DevboxError({
+                            reason: "migration",
+                            message: `Could not seal ${name} against new writes before deleting: ${error.message} Retry, or delete with force to discard its threads.`,
+                          }),
+                      ),
+                    );
+                    if (Deferred.isDoneUnsafe(activeFenceLost)) {
+                      return yield* Deferred.await(activeFenceLost).pipe(
+                        Effect.flatMap(Effect.fail),
+                      );
+                    }
+                  }
+                }
+                deleteSubmitted = true;
+                yield* coder(["delete", name, "--yes"], "15 minutes");
+                deletedOnCoder = true;
+                if (pendingDeletedHistory !== undefined) {
+                  const entry = pendingDeletedHistory;
+                  yield* Ref.update(history, (current) => [
+                    ...current.filter((box) => box.name !== name),
+                    entry,
+                  ]);
+                }
+              }
+              yield* FiberMap.remove(creations, name);
+              yield* FiberMap.remove(tunnels, name);
+              yield* FiberMap.remove(antigravitySyncs, name);
+              yield* FiberMap.remove(vertexTunnels, name);
+              if (record.environmentId !== null)
+                yield* peerLinks.unlink(record.environmentId as EnvironmentId).pipe(Effect.ignore);
+              yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
+              pushed.delete(name);
+              pushedCursorKeys.delete(name);
+              pushedAntigravity.delete(name);
+              persistedAntigravityManaged.delete(name);
+              unboundBoxes.delete(name);
+              bindAttempts.delete(name);
+              yield* Ref.update(records, (current) => {
+                const next = new Map(current);
+                next.delete(name);
+                return next;
+              });
+              yield* save();
+              yield* setTransient(name, undefined);
+              return {
+                name,
+                deleted: true,
+                migratedThreads,
+                skippedThreads,
+                migratedAttachments,
+                ...(migrationWarning === undefined ? {} : { migrationWarning }),
+              };
+            }),
+          ).pipe(
+            // Runs after Effect.scoped releases the remote fence SSH fiber. If coder delete was
+            // submitted, keep the box sealed unless Coder confirms the delete did not stay active.
+            Effect.onExit((exit) => {
+              if (Exit.isSuccess(exit)) return Effect.void;
+              return Effect.gen(function* () {
+                yield* FiberMap.remove(creations, name);
+                if (deletedOnCoder) return;
+                if (deleteSubmitted) {
+                  const refreshed = yield* workspaces.pipe(Effect.orElseSucceed(() => undefined));
+                  const latestStatus = refreshed?.get(name)?.latest_build.status;
+                  if (!isSafeToReopenAfterDeleteFailure(latestStatus)) {
+                    // Tear down the SSH tunnel so if inventory later recovers with the box still
+                    // running, periodic reconnect runs PROVISION_SCRIPT to unseal and restart T3.
+                    yield* FiberMap.remove(tunnels, name);
+                    yield* Effect.logWarning(
+                      "keeping devbox sealed because Coder delete may still be in progress",
+                      { name, latestStatus: latestStatus ?? "unknown" },
+                    );
+                    return;
+                  }
+                }
+                if (wokeForMigration) {
+                  if (sealedForDelete || stoppedServiceForMigration) {
+                    yield* unsealRemoteT3(name).pipe(
+                      Effect.catchCause((cause) =>
+                        Effect.logWarning(
+                          "could not unseal devbox woken for failed/interrupted delete",
+                          { name, cause },
+                        ),
+                      ),
+                    );
+                  }
+                  yield* coder(["stop", name, "--yes"], "2 minutes").pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning(
+                        "could not stop devbox woken for failed/interrupted migration",
+                        { name, cause },
+                      ),
+                    ),
+                  );
+                } else if (stoppedServiceForMigration) {
+                  yield* startRemoteT3Service(name).pipe(
+                    Effect.catchCause((cause) =>
+                      FiberMap.remove(tunnels, name).pipe(
+                        Effect.andThen(
+                          Effect.logWarning(
+                            "could not restart t3code.service after failed/interrupted delete",
+                            { name, cause },
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }
+              }).pipe(Effect.andThen(setTransient(name, undefined)));
+            }),
+          );
         }),
       );
     },
@@ -2228,26 +2711,23 @@ export const make = Effect.gen(function* () {
       };
     },
   );
-  /** Keeps a box's spans before Coder forgets them with the box. */
-  const rememberDeleted = Effect.fn("DevboxService.rememberDeleted")(function* (
+  /** Captures a box's usage spans before Coder forgets them on delete. */
+  const collectDeletedRecord = Effect.fn("DevboxService.collectDeletedRecord")(function* (
     name: string,
     environmentId: string | null,
+    workspaceId: string | undefined,
   ) {
-    const workspace = (yield* workspaces).get(name);
-    if (workspace?.id === undefined) return;
-    const builds = yield* buildsSince(workspace.id, 0);
+    if (workspaceId === undefined) return undefined;
+    const builds = yield* buildsSince(workspaceId, 0);
     const spans = devboxSpans(builds, yield* Clock.currentTimeMillis);
-    if (spans.existed === null) return;
+    if (spans.existed === null) return undefined;
     const existed = spans.existed;
-    yield* Ref.update(history, (current) => [
-      ...current.filter((box) => box.name !== name),
-      {
-        name,
-        ...(environmentId === null ? {} : { environmentId }),
-        awake: spans.awake,
-        existed,
-      },
-    ]);
+    return {
+      name,
+      ...(environmentId === null ? {} : { environmentId }),
+      awake: spans.awake,
+      existed,
+    } satisfies DeletedDevboxRecord;
   });
 
   const deleted: DevboxService["Service"]["deleted"] = Ref.get(history).pipe(
@@ -2385,8 +2865,13 @@ export const make = Effect.gen(function* () {
     yield* reconcileWithCoder(all);
     yield* syncCursor(all);
     yield* syncAntigravity(all, true);
+    const held = new Set(yield* locks.activeKeys);
+    const currentTransient = yield* Ref.get(transient);
     for (const record of (yield* Ref.get(records)).values()) {
       if (all.get(record.name)?.latest_build.status !== "running") continue;
+      if (held.has(record.name)) continue;
+      const state = currentTransient.get(record.name)?.state;
+      if (state === "deleting" || state === "stopping") continue;
       if (yield* FiberMap.has(creations, record.name)) continue;
       if (
         record.environmentId !== null &&
@@ -2397,7 +2882,18 @@ export const make = Effect.gen(function* () {
         creations,
         record.name,
         locks
-          .withLock(record.name, connect(record))
+          .withLock(
+            record.name,
+            Effect.gen(function* () {
+              const latestRecord = (yield* Ref.get(records)).get(record.name);
+              if (latestRecord === undefined) return;
+              const latestState = (yield* Ref.get(transient)).get(record.name)?.state;
+              if (latestState === "deleting" || latestState === "stopping") return;
+              const latestStatus = (yield* workspaces).get(record.name)?.latest_build.status;
+              if (latestStatus !== "running") return;
+              yield* connect(latestRecord);
+            }),
+          )
           .pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("devbox setup retry failed", { name: record.name, cause }),
@@ -2483,6 +2979,7 @@ function shellQuote(value: string): string {
 
 export const layer = Layer.effect(DevboxService, make).pipe(
   Layer.provide(DevboxLogins.layer),
+  Layer.provide(DevboxThreadMigration.layer),
   Layer.provide(DevboxVertexMetadata.DevboxVertexMetadata.layer),
   Layer.provide(FetchHttpClient.layer),
 );

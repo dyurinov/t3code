@@ -24,7 +24,12 @@ export const layer = McpToolAccess.toLayer(DevboxToolkit, {
   devbox_list: McpToolAccess.reads(() =>
     withService((service) =>
       Effect.all([service.list, service.logins, service.deleted]).pipe(
-        Effect.map(([devboxes, logins, deleted]) => ({ devboxes, logins, deleted })),
+        Effect.map(([devboxes, logins, deleted]) => ({
+          devboxes,
+          logins,
+          deleted,
+          migratesThreadsOnDelete: true,
+        })),
       ),
     ),
   ),
@@ -44,9 +49,9 @@ export const layer = McpToolAccess.toLayer(DevboxToolkit, {
   devbox_stop: McpToolAccess.writesEnvironment(({ name }) =>
     withService((service) => service.stop(name)),
   ),
-  devbox_delete: McpToolAccess.writesEnvironment(({ name, force }) =>
-    withService((service) => service.remove(name, { force: force ?? false })).pipe(
-      Effect.as({ name, deleted: true }),
+  devbox_delete: McpToolAccess.writesEnvironment(({ name, force, skipMigration }) =>
+    withService((service) =>
+      service.remove(name, { force: force ?? false, skipMigration: skipMigration ?? false }),
     ),
   ),
 });

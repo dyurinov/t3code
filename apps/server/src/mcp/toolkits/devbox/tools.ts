@@ -81,7 +81,7 @@ const DevboxStopTool = Tool.make("devbox_stop", {
 const DevboxDeleteTool = Tool.make("devbox_delete", {
   ...shared,
   description:
-    "Delete a devbox and its environment link. Its threads and any unpushed work are lost; push first. Refuses while a turn runs unless `force`.",
+    "Move a devbox's threads to this machine (waking a stopped box first if needed), then delete the devbox and its environment link. Unpushed code on the box is lost; push first. Refuses while a turn runs or if threads cannot be copied unless `force`.",
   parameters: DevboxDeleteInput,
   success: DevboxDeleteResult,
 })

@@ -37,6 +37,8 @@ export function useDevboxes(): {
   readonly logins: ReadonlyArray<DevboxLogin>;
   /** Boxes T3 deleted; their saved environments are dead ends. */
   readonly deleted: ReadonlyArray<DeletedDevbox>;
+  /** Whether this host copies threads off a devbox before deleting it. */
+  readonly migratesThreadsOnDelete: boolean;
   readonly refresh: () => void;
 } {
   const wakeRequests = useAtomValue(devboxWakeRequestsAtom);
@@ -57,6 +59,7 @@ export function useDevboxes(): {
     ),
     logins: query.data?.logins ?? [],
     deleted: query.data?.deleted ?? [],
+    migratesThreadsOnDelete: query.data?.migratesThreadsOnDelete === true,
     refresh: query.refresh,
   };
 }
@@ -115,7 +118,7 @@ export function devboxStatusLabel(
   switch (devbox.state) {
     case "running":
       return devbox.credentials.claude === "unbound" || devbox.credentials.codex === "unbound"
-        ? "Needs a Formal sign-in on the box."
+        ? resolve(msg("Needs a Formal sign-in on the box."))
         : null;
     case "stopped":
       return resolve(msg("Sleeping. Wake it to use it here."));

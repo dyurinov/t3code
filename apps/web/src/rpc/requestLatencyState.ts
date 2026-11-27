@@ -42,6 +42,7 @@ const longRunningRpcAckMethods = new Set<string>([
   WS_METHODS.serverRefreshProviders,
   WS_METHODS.serverUpdateServer,
   WS_METHODS.vcsRefreshStatus,
+  WS_METHODS.devboxesDelete,
 ]);
 
 const slowRpcAckRequestsAtom = Atom.make<ReadonlyArray<SlowRpcAckRequest>>([]).pipe(

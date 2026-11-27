@@ -393,6 +393,38 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
         }
     `.pipe(NodeSqliteClient.readOnly);
 
+    // Bottom-up reachability from the single candidate thread: `instr` short-circuits JSON
+    // extraction on unrelated threads so writer statements stay fast even on large DBs.
+    const notShownClause = (threadId: string) => sql`
+      NOT EXISTS (
+        WITH RECURSIVE descendants(thread_id) AS (
+          SELECT ${threadId}
+          UNION
+          SELECT fork.thread_id
+          FROM orchestration_v2_projection_threads AS fork
+          JOIN descendants
+            ON fork.thread_id <> descendants.thread_id
+           AND instr(fork.payload_json, json_quote(descendants.thread_id)) > 0
+           AND json_extract(fork.payload_json, '$.forkedFrom.type') = 'run'
+           AND json_extract(fork.payload_json, '$.forkedFrom.threadId') = descendants.thread_id
+        )
+        SELECT 1
+        FROM descendants
+        JOIN orchestration_v2_projection_threads AS t ON t.thread_id = descendants.thread_id
+        WHERE t.deleted_at IS NULL
+        UNION ALL
+        SELECT 1
+        FROM descendants
+        JOIN orchestration_v2_projection_context_transfers AS transfer
+          ON transfer.source_thread_id = descendants.thread_id
+        JOIN orchestration_v2_projection_threads AS target
+          ON target.thread_id = transfer.target_thread_id
+        WHERE transfer.type = 'merge_back'
+          AND transfer.status = 'pending'
+          AND target.deleted_at IS NULL
+      )
+    `;
+
     const purgeThreads = Effect.fnUntraced(function* (
       deletedThreadId: ThreadId | undefined,
       betweenPages: Effect.Effect<void>,
@@ -413,6 +445,9 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
         }
       });
       for (const { thread_id: threadId } of threads) {
+        // Re-check live fork/transfer reachability on every writer statement so an atomic
+        // import or fork committed after purgeableThreads() cannot have its ancestor purged.
+        const guard = notShownClause(threadId);
         const tombstone = sql`(
           SELECT json_remove(json_set(payload_json, '$.title', ${DELETED_THREAD_TITLE}), '$.guestShare')
           FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
@@ -427,6 +462,7 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
             AND aggregate_kind = 'thread'
             AND stream_id = ${threadId}
             AND event_type IN ('thread.created', 'thread.deleted')
+            AND ${guard}
         `;
         // The head row only holds the stream's position, so any other head becomes the tombstone.
         // First, so the head never borrows a prompt from an anchor already deleted below.
@@ -443,6 +479,7 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
             AND NOT (
               event_type = 'run.updated' AND json_extract(payload_json, '$.status') = 'running'
             )
+            AND ${guard}
         `;
         for (const table of DELETED_THREAD_CONTENT_TABLES) {
           yield* drain(sql`
@@ -450,6 +487,7 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
             WHERE rowid IN (
               SELECT rowid FROM ${sql(table)} WHERE thread_id = ${threadId} LIMIT ${PURGE_BATCH_SIZE}
             )
+            AND ${guard}
             RETURNING 1 AS purged
           `);
         }
@@ -476,6 +514,7 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
             ORDER BY sequence DESC
             LIMIT ${PURGE_BATCH_SIZE}
           )
+          AND ${guard}
           RETURNING 1 AS purged
         `);
         // Settled requests can hold answers, feedback, and titles. A failed one stays as the
@@ -483,6 +522,7 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
         yield* sql`
           DELETE FROM orchestration_v2_effect_outbox
           WHERE thread_id = ${threadId} AND status IN ('succeeded', 'cancelled')
+            AND ${guard}
         `;
         yield* sql`
           UPDATE orchestration_v2_effect_outbox
@@ -493,21 +533,27 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
           END,
             last_error = NULL
           WHERE thread_id = ${threadId} AND status = 'failed'
+            AND ${guard}
         `;
         // Its v1 events then go with the imported-history prune, and no import refills it.
         yield* sql`
           UPDATE orchestration_v2_legacy_imports
           SET transcript_imported_at = ${now}
           WHERE thread_id = ${threadId} AND transcript_imported_at IS NULL
+            AND ${guard}
         `;
         // Last, because the new title is what marks the purge as done.
         yield* sql`
-          UPDATE projection_threads SET title = ${DELETED_THREAD_TITLE} WHERE thread_id = ${threadId}
+          UPDATE projection_threads
+          SET title = ${DELETED_THREAD_TITLE}
+          WHERE thread_id = ${threadId}
+            AND ${guard}
         `;
         yield* sql`
           UPDATE orchestration_v2_projection_threads
           SET title = ${DELETED_THREAD_TITLE}, payload_json = ${tombstone}
           WHERE thread_id = ${threadId}
+            AND ${guard}
         `;
       }
       return purged;

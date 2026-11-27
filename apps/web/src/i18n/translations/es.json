@@ -13119,5 +13119,11 @@
   "95435f0b59cb2193": "Vista previa de audio",
   "4a12506938295127": "Introduce primero {field}.",
   "5807c08e225c6b3d": "Descargar",
-  "0d50b5bfe7151ece": "No se pudo descargar el archivo"
+  "0d50b5bfe7151ece": "No se pudo descargar el archivo",
+  "0a8f3d37843b7d3b": "{reason}\n\n¿Eliminar {name} de todos modos? Sus hilos se copiarán primero si es posible, pero si la copia falla el devbox se eliminará igualmente y se perderán los hilos, archivos adjuntos y código sin publicar.",
+  "b39c225bab00630d": "¿Eliminar el devbox {name}? Sus hilos se moverán primero a esta máquina, mientras que cualquier código sin publicar en el devbox se perderá.",
+  "bfd14713c4ff6781": "{reason}\n\n¿Eliminar {name} de todos modos? Se perderán los hilos o archivos adjuntos no copiados y el trabajo sin publicar.",
+  "d68ddb09041a63a9": "Moviendo hilos y eliminando {name}…",
+  "e51fe1440639080b": "{name} eliminado ({count} {count, plural, one {hilo movido} other {hilos movidos}})",
+  "f4440ea4a61fc672": "Requiere iniciar sesión en Formal en la caja."
 }

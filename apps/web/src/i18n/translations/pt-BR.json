@@ -13124,5 +13124,11 @@
   "95435f0b59cb2193": "Prévia de áudio",
   "4a12506938295127": "Informe primeiro {field}.",
   "5807c08e225c6b3d": "Baixar",
-  "0d50b5bfe7151ece": "Não foi possível baixar o arquivo"
+  "0d50b5bfe7151ece": "Não foi possível baixar o arquivo",
+  "0a8f3d37843b7d3b": "{reason}\n\nExcluir {name} mesmo assim? Suas threads serão copiadas primeiro se possível, mas se a cópia falhar a box ainda será excluída e threads, anexos e códigos não enviados serão perdidos.",
+  "b39c225bab00630d": "Excluir a devbox {name}? Suas threads serão movidas para esta máquina primeiro, enquanto qualquer código não enviado na box será perdido.",
+  "bfd14713c4ff6781": "{reason}\n\nExcluir {name} mesmo assim? Threads ou anexos não copiados e trabalho não enviado serão perdidos.",
+  "d68ddb09041a63a9": "Movendo threads e excluindo {name}…",
+  "e51fe1440639080b": "{name} excluída ({count} {count, plural, one {thread movida} other {threads movidas}})",
+  "f4440ea4a61fc672": "Precisa entrar no Formal na box."
 }

@@ -13131,5 +13131,11 @@
   "95435f0b59cb2193": "Ljudförhandsvisning",
   "4a12506938295127": "Ange {field} först.",
   "5807c08e225c6b3d": "Ladda ned",
-  "0d50b5bfe7151ece": "Det gick inte att ladda ned filen"
+  "0d50b5bfe7151ece": "Det gick inte att ladda ned filen",
+  "0a8f3d37843b7d3b": "{reason}\n\nTa bort {name} ändå? Dess trådar kopieras först om möjligt, men om kopieringen misslyckas tas boxen ändå bort och okopierade trådar, bilagor och opushad kod går förlorade.",
+  "b39c225bab00630d": "Ta bort devbox {name}? Dess trådar flyttas till den här datorn först, medan kod som inte har pushats på boxen går förlorad.",
+  "bfd14713c4ff6781": "{reason}\n\nTa bort {name} ändå? Okopierade trådar eller bilagor samt arbete som inte har pushats går förlorade.",
+  "d68ddb09041a63a9": "Flyttar trådar och tar bort {name}…",
+  "e51fe1440639080b": "Tog bort {name} (flyttade {count} {count, plural, one {tråd} other {trådar}})",
+  "f4440ea4a61fc672": "Kräver inloggning i Formal på boxen."
 }

@@ -13124,5 +13124,11 @@
   "95435f0b59cb2193": "Aperçu audio",
   "4a12506938295127": "Saisissez d’abord {field}.",
   "5807c08e225c6b3d": "Télécharger",
-  "0d50b5bfe7151ece": "Impossible de télécharger le fichier"
+  "0d50b5bfe7151ece": "Impossible de télécharger le fichier",
+  "0a8f3d37843b7d3b": "{reason}\n\nSupprimer {name} quand même ? Ses fils seront copiés d’abord si possible, mais en cas d’échec la box sera tout de même supprimée et les fils, pièces jointes et code non poussés seront perdus.",
+  "b39c225bab00630d": "Supprimer la devbox {name} ? Ses fils de discussion seront d’abord déplacés sur cette machine, tandis que tout code non poussé sur la box sera perdu.",
+  "bfd14713c4ff6781": "{reason}\n\nSupprimer {name} quand même ? Les fils ou pièces jointes non copiés ainsi que le travail non poussé seront perdus.",
+  "d68ddb09041a63a9": "Déplacement des fils et suppression de {name}…",
+  "e51fe1440639080b": "{name} supprimée ({count} {count, plural, one {fil déplacé} other {fils déplacés}})",
+  "f4440ea4a61fc672": "Nécessite une connexion Formal sur la box."
 }

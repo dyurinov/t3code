@@ -325,9 +325,33 @@ export function projectThreadProjectionForWire(
   };
 }
 
+function stripForkRunIdsFromThread<
+  T extends { readonly forkedFrom: OrchestrationV2ThreadProjection["thread"]["forkedFrom"] },
+>(thread: T): T {
+  if (thread.forkedFrom?.type !== "run" || thread.forkedFrom.forkRunIds === undefined) {
+    return thread;
+  }
+  return {
+    ...thread,
+    forkedFrom: {
+      type: "run",
+      threadId: thread.forkedFrom.threadId,
+      runId: thread.forkedFrom.runId,
+    },
+  };
+}
+
 export function projectDomainEventForWire(
   event: OrchestrationV2DomainEvent,
 ): OrchestrationV2DomainEvent {
+  if (
+    event.type === "thread.created" ||
+    event.type === "thread.metadata-updated" ||
+    event.type === "thread.deleted"
+  ) {
+    const payload = stripForkRunIdsFromThread(event.payload);
+    return payload === event.payload ? event : { ...event, payload };
+  }
   return event.type === "turn-item.updated"
     ? { ...event, payload: projectTurnItemForWire(event.payload) }
     : event.type === "context-handoff.updated"

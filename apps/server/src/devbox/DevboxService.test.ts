@@ -1,5 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  DevboxError,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -43,6 +44,7 @@ import { ServerActivation } from "../serverActivation.ts";
 import * as ServerSettingsService from "../serverSettings.ts";
 import * as DevboxLogins from "./DevboxLogins.ts";
 import * as DevboxService from "./DevboxService.ts";
+import * as DevboxThreadMigration from "./DevboxThreadMigration.ts";
 import * as DevboxVertexMetadata from "./DevboxVertexMetadata.ts";
 
 const CURSOR_INSTANCE_ID = ProviderInstanceId.make("cursor");
@@ -146,6 +148,10 @@ const setup = Effect.fn("test.setup")(function* (
           brokerId: "test-broker",
           hasAdcCredentials: Effect.succeed(false),
           getAccount: Effect.succeed(null),
+        }),
+        Layer.mock(DevboxThreadMigration.DevboxThreadMigration)({
+          migrateFromDevbox: () =>
+            Effect.succeed({ migratedThreads: 0, skippedThreads: 0, migratedAttachments: 0 }),
         }),
         Layer.mock(DevboxLogins.DevboxLogins)({
           info: () =>
@@ -731,6 +737,14 @@ describe("devbox Antigravity Vertex ADC sync", () => {
                   ),
                   getAccount: Effect.succeed("dev@example.com"),
                 }),
+                Layer.mock(DevboxThreadMigration.DevboxThreadMigration)({
+                  migrateFromDevbox: () =>
+                    Effect.succeed({
+                      migratedThreads: 0,
+                      skippedThreads: 0,
+                      migratedAttachments: 0,
+                    }),
+                }),
                 Layer.mock(DevboxLogins.DevboxLogins)({
                   info: () =>
                     Effect.succeed({
@@ -1059,6 +1073,500 @@ describe("devbox Antigravity Vertex ADC sync", () => {
           expect(mutationCount).toBe(6);
           expect(boxSettings.providerInstances[ANTIGRAVITY_ID]?.enabled).toBe(true);
         }).pipe(Effect.provide(boxServerLayer));
+      }),
+  );
+});
+
+describe("devbox deletion with thread migration", () => {
+  const makeDeleteHarness = (input: {
+    readonly status: "running" | "stopped" | "failed" | "starting" | "stopping";
+    readonly statusAfterDeleteFailure?: "running" | "stopped" | "deleting" | "deleted";
+    readonly migrateResult: Effect.Effect<
+      DevboxThreadMigration.DevboxThreadMigrationResult,
+      DevboxError
+    >;
+    readonly activeRun?: boolean;
+    readonly failDelete?: boolean;
+    readonly dropFenceOn?: Deferred.Deferred<void>;
+    readonly blockFenceBeforeReady?: Deferred.Deferred<void>;
+  }) =>
+    Effect.gen(function* () {
+      const boxName = "12-stale-box";
+      const commands: Array<string> = [];
+      let startArgs: ReadonlyArray<string> = [];
+      let unlinkCalls = 0;
+      let deleteAttempted = false;
+      const files = new Map([
+        [
+          "/state/userdata/devboxes.json",
+          JSON.stringify({
+            devboxes: [
+              {
+                name: boxName,
+                localPort: 13807,
+                environmentId: "env-stale-12",
+                task: "Old task",
+                createdAt: "2026-11-17T15:30:43.380Z",
+                credentials: { claude: "installed", codex: "installed" },
+              },
+            ],
+          }),
+        ],
+      ]);
+      const filesystem = FileSystem.layerNoop({
+        readFileString: (file) => Effect.sync(() => files.get(file) ?? ""),
+        writeFileString: (file, text) => Effect.sync(() => void files.set(file, text)),
+        rename: (from, to) => Effect.sync(() => void files.set(to, files.get(from) ?? "")),
+        makeDirectory: () => Effect.void,
+      });
+      const settingsChanges = yield* Queue.unbounded<ServerSettings>();
+      const service = yield* DevboxService.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: { T3CODE_DEVBOX_SPARES: "0" } })),
+            filesystem,
+            Path.layer,
+            ServerConfig.layerTest("/checkout", "/state").pipe(
+              Layer.provide([filesystem, Path.layer]),
+            ),
+            Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+            Layer.mock(PeerLinks.PeerLinks)({
+              unlink: () =>
+                Effect.sync(() => {
+                  unlinkCalls += 1;
+                  return { removed: true, endedThere: true };
+                }),
+            }),
+            Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+            Layer.mock(SecretResolver.SecretResolver)({}),
+            Layer.mock(ServerSettingsService.ServerSettingsService)({
+              getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+              subscribeChanges: Effect.succeed(Stream.fromQueue(settingsChanges)),
+            }),
+            Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedNone }),
+            Layer.mock(Digest.Digest)({ digest: () => Effect.succeed(new Uint8Array(32)) }),
+            Layer.mock(NetService.NetService)({ canListenOnHost: () => Effect.succeed(true) }),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make(() => Effect.die("Unexpected HTTP request")),
+            ),
+            Layer.succeed(ServerActivation, Effect.never),
+            Layer.mock(DevboxVertexMetadata.DevboxVertexMetadata)({
+              socketPath: "",
+              brokerId: "test-broker",
+              hasAdcCredentials: Effect.succeed(false),
+              getAccount: Effect.succeed(null),
+            }),
+            Layer.mock(DevboxLogins.DevboxLogins)({
+              info: () =>
+                Effect.succeed({
+                  signedIn: false,
+                  account: null,
+                  expiresAt: null,
+                  sealed: false,
+                }),
+              payload: Effect.succeed({ claude: null, codex: null }),
+              due: () => Effect.succeedNone,
+              generation: () => Effect.succeed(0),
+              pendingUrl: () => Effect.succeed(null),
+            }),
+            Layer.mock(DevboxThreadMigration.DevboxThreadMigration)({
+              migrateFromDevbox: ({ name }) =>
+                Effect.sync(() => {
+                  commands.push(`migrate:${name}`);
+                }).pipe(Effect.andThen(input.migrateResult)),
+            }),
+            Layer.succeed(ProcessRunner.ProcessRunner, {
+              run: (runInput) =>
+                Effect.gen(function* () {
+                  if (runInput.command === "coder" && runInput.args[0] === "list") {
+                    const currentStatus =
+                      deleteAttempted && input.statusAfterDeleteFailure !== undefined
+                        ? input.statusAfterDeleteFailure
+                        : input.status;
+                    return {
+                      stdout: JSON.stringify([
+                        { name: boxName, latest_build: { status: currentStatus } },
+                      ]),
+                      stderr: "",
+                      code: ChildProcessSpawner.ExitCode(0),
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                      stdoutInvalidUtf8: false,
+                      stderrInvalidUtf8: false,
+                    };
+                  }
+                  if (runInput.command === "coder") {
+                    if (runInput.args[0] === "start") startArgs = runInput.args;
+                    commands.push(`coder:${runInput.args[0]}`);
+                    if (runInput.args[0] === "delete") {
+                      deleteAttempted = true;
+                    }
+                    if (runInput.args[0] === "delete" && input.failDelete) {
+                      return {
+                        stdout: "",
+                        stderr: "coder delete failed",
+                        code: ChildProcessSpawner.ExitCode(1),
+                        timedOut: false,
+                        stdoutTruncated: false,
+                        stderrTruncated: false,
+                        stdoutInvalidUtf8: false,
+                        stderrInvalidUtf8: false,
+                      };
+                    }
+                  } else if (
+                    runInput.command === "ssh" &&
+                    typeof runInput.stdin === "string" &&
+                    runInput.stdin.includes("LoadState")
+                  ) {
+                    commands.push("ssh:fence-t3");
+                    const checkActive = runInput.args.some((arg) => arg.includes("--check-active"));
+                    if (checkActive && input.activeRun) {
+                      return {
+                        stdout: "",
+                        stderr: "ACTIVE_RUNS:1\n",
+                        code: ChildProcessSpawner.ExitCode(42),
+                        timedOut: false,
+                        stdoutTruncated: false,
+                        stderrTruncated: false,
+                        stdoutInvalidUtf8: false,
+                        stderrInvalidUtf8: false,
+                      };
+                    }
+                    if (input.blockFenceBeforeReady !== undefined) {
+                      yield* Deferred.succeed(input.blockFenceBeforeReady, undefined);
+                      return yield* Effect.never;
+                    }
+                    runInput.onStdoutChunk?.(new TextEncoder().encode("FENCED\n"));
+                    // Simulate holding the remote server-owner.sqlite lock until scope interrupts
+                    // or a test explicitly drops the fence SSH session mid-delete.
+                    if (input.dropFenceOn !== undefined) {
+                      yield* Deferred.await(input.dropFenceOn);
+                      return {
+                        stdout: "FENCED\n",
+                        stderr: "connection reset by peer",
+                        code: ChildProcessSpawner.ExitCode(255),
+                        timedOut: false,
+                        stdoutTruncated: false,
+                        stderrTruncated: false,
+                        stdoutInvalidUtf8: false,
+                        stderrInvalidUtf8: false,
+                      };
+                    }
+                    return yield* Effect.never;
+                  } else if (
+                    runInput.command === "ssh" &&
+                    runInput.args.some((arg) => arg.includes("chmod 000"))
+                  ) {
+                    commands.push("ssh:seal-t3");
+                  } else if (
+                    runInput.command === "ssh" &&
+                    runInput.args.some((arg) =>
+                      arg.includes("systemctl --user start t3code.service"),
+                    )
+                  ) {
+                    commands.push("ssh:start-t3");
+                  } else if (
+                    runInput.command === "ssh" &&
+                    runInput.args.some((arg) => arg.includes("chmod 0644"))
+                  ) {
+                    commands.push("ssh:unseal-t3");
+                  }
+                  return {
+                    stdout: "",
+                    stderr: "",
+                    code: ChildProcessSpawner.ExitCode(0),
+                    timedOut: false,
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                    stdoutInvalidUtf8: false,
+                    stderrInvalidUtf8: false,
+                  };
+                }),
+            }),
+          ),
+        ),
+      );
+      return {
+        boxName,
+        commands,
+        getStartArgs: () => startArgs,
+        getUnlinkCalls: () => unlinkCalls,
+        service,
+      };
+    });
+
+  it.effect(
+    "wakes a stopped devbox with autoupdate defaults, fences t3code.service, migrates threads, then deletes",
+    () =>
+      Effect.gen(function* () {
+        const { boxName, commands, getStartArgs, getUnlinkCalls, service } =
+          yield* makeDeleteHarness({
+            status: "stopped",
+            migrateResult: Effect.succeed({
+              migratedThreads: 4,
+              skippedThreads: 1,
+              migratedAttachments: 2,
+            }),
+          });
+        const result = yield* service.remove(boxName, { force: false });
+        expect(result).toEqual({
+          name: boxName,
+          deleted: true,
+          migratedThreads: 4,
+          skippedThreads: 1,
+          migratedAttachments: 2,
+        });
+        expect(getStartArgs()).toEqual([
+          "start",
+          boxName,
+          "--yes",
+          "--use-parameter-defaults",
+          "--parameter-default",
+          "created_via=z-devbox",
+        ]);
+        expect(commands).toEqual([
+          "coder:start",
+          "coder:ssh",
+          "ssh:fence-t3",
+          `migrate:${boxName}`,
+          "ssh:seal-t3",
+          "coder:delete",
+        ]);
+        expect(getUnlinkCalls()).toBe(1);
+      }),
+  );
+
+  it.effect(
+    "refuses to delete without force when migration fails, restarts t3code.service, and keeps the peer link",
+    () =>
+      Effect.gen(function* () {
+        const { boxName, commands, getUnlinkCalls, service } = yield* makeDeleteHarness({
+          status: "running",
+          migrateResult: Effect.fail(
+            new DevboxError({ reason: "provision", message: "ssh timeout" }),
+          ),
+        });
+        const failure = yield* Effect.flip(service.remove(boxName, { force: false }));
+        expect(failure.reason).toBe("migration");
+        expect(failure.message).toContain("Could not copy threads");
+        expect(commands).not.toContain("coder:delete");
+        expect(commands).toContain("ssh:start-t3");
+        expect(getUnlinkCalls()).toBe(0);
+        const listed = yield* service.list;
+        expect(listed[0]?.state).toBe("running");
+      }),
+  );
+
+  it.effect("stops a woken box again if non-force migration fails", () =>
+    Effect.gen(function* () {
+      const { boxName, commands, service } = yield* makeDeleteHarness({
+        status: "stopped",
+        migrateResult: Effect.fail(
+          new DevboxError({ reason: "migration", message: "corrupt export" }),
+        ),
+      });
+      const failure = yield* Effect.flip(service.remove(boxName, { force: false }));
+      expect(failure.reason).toBe("migration");
+      expect(commands).toContain("coder:stop");
+      expect(commands).not.toContain("coder:delete");
+    }),
+  );
+
+  it.effect(
+    "skips waking a failed box on force delete and deletes immediately with migrationWarning",
+    () =>
+      Effect.gen(function* () {
+        const { boxName, commands, service } = yield* makeDeleteHarness({
+          status: "failed",
+          migrateResult: Effect.die("migration should not run on failed force delete"),
+        });
+        const result = yield* service.remove(boxName, { force: true });
+        expect(result.deleted).toBe(true);
+        expect(result.migratedThreads).toBe(0);
+        expect(result.migrationWarning).toContain("failed");
+        expect(commands).toEqual(["coder:delete"]);
+      }),
+  );
+
+  it.effect("rejects skipMigration without force", () =>
+    Effect.gen(function* () {
+      const { boxName, commands, service } = yield* makeDeleteHarness({
+        status: "running",
+        migrateResult: Effect.die("should not run"),
+      });
+      const failure = yield* Effect.flip(
+        service.remove(boxName, { force: false, skipMigration: true }),
+      );
+      expect(failure.reason).toBe("invalid");
+      expect(commands).toEqual([]);
+    }),
+  );
+
+  it.effect(
+    "wakes and migrates a stopped box on force delete (preserving threads after stopped -> busy -> force)",
+    () =>
+      Effect.gen(function* () {
+        const { boxName, commands, service } = yield* makeDeleteHarness({
+          status: "stopped",
+          activeRun: true,
+          migrateResult: Effect.succeed({
+            migratedThreads: 2,
+            skippedThreads: 0,
+            migratedAttachments: 1,
+          }),
+        });
+        const result = yield* service.remove(boxName, { force: true });
+        expect(result).toEqual({
+          name: boxName,
+          deleted: true,
+          migratedThreads: 2,
+          skippedThreads: 0,
+          migratedAttachments: 1,
+        });
+        expect(commands).toEqual([
+          "coder:start",
+          "coder:ssh",
+          "ssh:fence-t3",
+          `migrate:${boxName}`,
+          "ssh:seal-t3",
+          "coder:delete",
+        ]);
+      }),
+  );
+
+  it.effect("keeps peer link intact and restarts t3code.service if coder delete fails", () =>
+    Effect.gen(function* () {
+      const { boxName, commands, getUnlinkCalls, service } = yield* makeDeleteHarness({
+        status: "running",
+        failDelete: true,
+        migrateResult: Effect.succeed({
+          migratedThreads: 2,
+          skippedThreads: 0,
+          migratedAttachments: 0,
+        }),
+      });
+      const failure = yield* Effect.flip(service.remove(boxName, { force: false }));
+      expect(failure.reason).toBe("coder");
+      expect(getUnlinkCalls()).toBe(0);
+      expect(commands).toContain("ssh:start-t3");
+    }),
+  );
+
+  it.effect("stops a woken box if coder delete fails", () =>
+    Effect.gen(function* () {
+      const { boxName, commands, getUnlinkCalls, service } = yield* makeDeleteHarness({
+        status: "stopped",
+        failDelete: true,
+        migrateResult: Effect.succeed({
+          migratedThreads: 1,
+          skippedThreads: 0,
+          migratedAttachments: 0,
+        }),
+      });
+      const failure = yield* Effect.flip(service.remove(boxName, { force: false }));
+      expect(failure.reason).toBe("coder");
+      expect(getUnlinkCalls()).toBe(0);
+      expect(commands).toContain("ssh:unseal-t3");
+      expect(commands).toContain("coder:stop");
+    }),
+  );
+
+  it.effect("stops a woken box if the delete request is interrupted mid-migration", () =>
+    Effect.gen(function* () {
+      const enteredMigration = yield* Deferred.make<void>();
+      const { boxName, commands, service } = yield* makeDeleteHarness({
+        status: "stopped",
+        migrateResult: Deferred.succeed(enteredMigration, undefined).pipe(
+          Effect.andThen(Effect.never),
+        ),
+      });
+      const fiber = yield* Effect.forkChild(service.remove(boxName, { force: false }));
+      yield* Deferred.await(enteredMigration);
+      yield* Fiber.interrupt(fiber);
+      expect(commands).toContain("coder:stop");
+      expect(commands).not.toContain("coder:delete");
+    }),
+  );
+
+  it.effect(
+    "aborts non-force delete without coder delete if the remote fence drops mid-migration",
+    () =>
+      Effect.gen(function* () {
+        const enteredMigration = yield* Deferred.make<void>();
+        const dropFenceOn = yield* Deferred.make<void>();
+        const { boxName, commands, getUnlinkCalls, service } = yield* makeDeleteHarness({
+          status: "running",
+          dropFenceOn,
+          migrateResult: Deferred.succeed(enteredMigration, undefined).pipe(
+            Effect.andThen(Effect.never),
+          ),
+        });
+        const fiber = yield* Effect.forkChild(service.remove(boxName, { force: false }));
+        yield* Deferred.await(enteredMigration);
+        yield* Deferred.succeed(dropFenceOn, undefined);
+        const failure = yield* Effect.flip(Fiber.join(fiber));
+        expect(failure.reason).toBe("migration");
+        expect(failure.message).toContain("Lost write fence");
+        expect(commands).not.toContain("coder:delete");
+        expect(commands).toContain("ssh:start-t3");
+        expect(getUnlinkCalls()).toBe(0);
+      }),
+  );
+
+  it.effect("interrupts promptly while waiting for FENCED and restarts t3code.service", () =>
+    Effect.gen(function* () {
+      const enteredFence = yield* Deferred.make<void>();
+      const { boxName, commands, service } = yield* makeDeleteHarness({
+        status: "running",
+        blockFenceBeforeReady: enteredFence,
+        migrateResult: Effect.die("migration should not start before FENCED"),
+      });
+      const fiber = yield* Effect.forkChild(service.remove(boxName, { force: false }));
+      yield* Deferred.await(enteredFence);
+      yield* Fiber.interrupt(fiber);
+      expect(commands).toContain("ssh:fence-t3");
+      expect(commands).toContain("ssh:start-t3");
+      expect(commands).not.toContain("coder:delete");
+    }),
+  );
+
+  it.effect(
+    "returns busy without starting or stopping when deleting a workspace whose build is in flight",
+    () =>
+      Effect.gen(function* () {
+        const { boxName, commands, service } = yield* makeDeleteHarness({
+          status: "starting",
+          migrateResult: Effect.die("should not migrate while starting"),
+        });
+        const failure = yield* Effect.flip(service.remove(boxName, { force: false }));
+        expect(failure.reason).toBe("busy");
+        expect(failure.message).toContain("starting");
+        expect(commands).toEqual([]);
+      }),
+  );
+
+  it.effect(
+    "keeps the devbox sealed when coder delete fails/times out while Coder still shows deleting",
+    () =>
+      Effect.gen(function* () {
+        const { boxName, commands, getUnlinkCalls, service } = yield* makeDeleteHarness({
+          status: "running",
+          statusAfterDeleteFailure: "deleting",
+          failDelete: true,
+          migrateResult: Effect.succeed({
+            migratedThreads: 2,
+            skippedThreads: 0,
+            migratedAttachments: 0,
+          }),
+        });
+        const failure = yield* Effect.flip(service.remove(boxName, { force: false }));
+        expect(failure.reason).toBe("coder");
+        expect(commands).toContain("ssh:seal-t3");
+        expect(commands).not.toContain("ssh:start-t3");
+        expect(commands).not.toContain("ssh:unseal-t3");
+        expect(getUnlinkCalls()).toBe(0);
       }),
   );
 });
