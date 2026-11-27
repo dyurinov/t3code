@@ -157,7 +157,7 @@ export function decodeGoKeyringSecret(secret: ArrayLike<number>): string {
   return text;
 }
 
-class AntigravityKeyringError extends Schema.TaggedError<AntigravityKeyringError>()(
+export class AntigravityKeyringError extends Schema.TaggedError<AntigravityKeyringError>()(
   "AntigravityKeyringError",
   { cause: Schema.Defect() },
 ) {
@@ -165,6 +165,9 @@ class AntigravityKeyringError extends Schema.TaggedError<AntigravityKeyringError
     return "Could not read the Antigravity sign-in from the system keyring.";
   }
 }
+
+const KEYRING_DENIED_MESSAGE =
+  "Could not read the Antigravity sign-in from the system keyring. Sign in again or restart to retry.";
 
 // A single-executable server resolves packages on disk only through `require`.
 const requireExternal = NodeModule.createRequire(import.meta.url);
@@ -338,6 +341,8 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
   let cached:
     | { fingerprint: string; account: string; accessToken: string; expiresAt: number }
     | undefined;
+  let cachedKeyring: { account: string; accessToken: string; expiresAt: number } | undefined;
+  let keyringDenied = false;
   let generation = 0;
 
   const request = (request: HttpClientRequest.HttpClientRequest) =>
@@ -346,6 +351,15 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.flatMap((response) => response.json),
       Effect.timeout("10 seconds"),
+    );
+  const resolveCliAccount = (token: (typeof CliToken.Type)["token"]) =>
+    request(
+      HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
+        HttpClientRequest.setHeaders({ Authorization: `Bearer ${token.access_token}` }),
+      ),
+    ).pipe(
+      Effect.flatMap(antigravityAccountFingerprint),
+      Effect.catch(() => sha256(`antigravity-cli\0${token.refresh_token || token.access_token}`)),
     );
   const read = Effect.gen(function* () {
     const startedGeneration = generation;
@@ -359,38 +373,80 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     let projectId: string | undefined;
     if (!(yield* fs.exists(tokenPath))) {
       cached = undefined;
-      // Google account instances bypass the keyring, whose one entry every profile shares.
-      const stored = (yield* fs.exists(cliTokenPath))
-        ? yield* fs.readFileString(cliTokenPath)
-        : input.authMethod === "oauth-business"
-          ? yield* readKeyringSecret
-          : undefined;
-      if (stored === undefined) {
+      if (yield* fs.exists(cliTokenPath)) {
+        cachedKeyring = undefined;
+        keyringDenied = false;
+        const { token } = yield* fs
+          .readFileString(cliTokenPath)
+          .pipe(Effect.flatMap(decodeCliToken));
+        if (!(Date.parse(token.expiry ?? "") > now + 60_000)) {
+          return makeUnavailableUsageLimits({
+            checkedAt,
+            reason: "probeFailed",
+            message:
+              "Antigravity's saved sign-in has expired. Start an Antigravity turn to renew it, then refresh limits.",
+          });
+        }
+        accessToken = token.access_token;
+        account = yield* resolveCliAccount(token);
+      } else if (input.authMethod !== "oauth-business") {
+        // Google account instances bypass the keyring, whose one entry every profile shares.
         return makeUnavailableUsageLimits({
           checkedAt,
           reason: "unsupported",
           message: "Sign in with Google to see Antigravity limits.",
         });
-      }
-      const { token } = yield* decodeCliToken(stored);
-      if (!(Date.parse(token.expiry ?? "") > now + 60_000)) {
+      } else if (cachedKeyring !== undefined && cachedKeyring.expiresAt > now + 60_000) {
+        accessToken = cachedKeyring.accessToken;
+        account = cachedKeyring.account;
+      } else if (keyringDenied) {
         return makeUnavailableUsageLimits({
           checkedAt,
           reason: "probeFailed",
-          message:
-            "Antigravity's saved sign-in has expired. Start an Antigravity turn to renew it, then refresh limits.",
+          message: KEYRING_DENIED_MESSAGE,
         });
+      } else {
+        cachedKeyring = undefined;
+        const keyringResult = yield* readKeyringSecret.pipe(
+          Effect.map((stored) => ({ _tag: "ok" as const, stored })),
+          Effect.catchTags({
+            AntigravityKeyringError: () => Effect.succeed({ _tag: "denied" as const }),
+          }),
+        );
+        if (keyringResult._tag === "denied") {
+          if (generation === startedGeneration) keyringDenied = true;
+          return makeUnavailableUsageLimits({
+            checkedAt,
+            reason: "probeFailed",
+            message: KEYRING_DENIED_MESSAGE,
+          });
+        }
+        if (keyringResult.stored === undefined) {
+          return makeUnavailableUsageLimits({
+            checkedAt,
+            reason: "unsupported",
+            message: "Sign in with Google to see Antigravity limits.",
+          });
+        }
+        const { token } = yield* decodeCliToken(keyringResult.stored);
+        const expiresAt = Date.parse(token.expiry ?? "");
+        if (!(expiresAt > now + 60_000)) {
+          return makeUnavailableUsageLimits({
+            checkedAt,
+            reason: "probeFailed",
+            message:
+              "Antigravity's saved sign-in has expired. Start an Antigravity turn to renew it, then refresh limits.",
+          });
+        }
+        accessToken = token.access_token;
+        account = yield* resolveCliAccount(token);
+        if (generation === startedGeneration) {
+          cachedKeyring = { account, accessToken, expiresAt };
+        }
       }
-      accessToken = token.access_token;
-      account = yield* request(
-        HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
-          HttpClientRequest.setHeaders({ Authorization: `Bearer ${accessToken}` }),
-        ),
-      ).pipe(
-        Effect.flatMap(antigravityAccountFingerprint),
-        Effect.catch(() => sha256(`antigravity-cli\0${token.refresh_token || accessToken}`)),
-      );
     } else {
+      cachedKeyring = undefined;
+      keyringDenied = false;
       const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));
       projectId = token.project_id;
       const fingerprint = yield* sha256(
@@ -499,6 +555,8 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     probe,
     clear: Effect.sync(() => {
       cached = undefined;
+      cachedKeyring = undefined;
+      keyringDenied = false;
       generation++;
     }),
   };

@@ -12,6 +12,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 import {
+  AntigravityKeyringError,
   decodeGoKeyringSecret,
   makeAntigravityUsageProbe,
   readWindowsCliCredential,
@@ -72,6 +73,7 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
     missingToken?: boolean;
     authMethod?: "oauth-personal" | "oauth-business" | "gemini-api-key";
     keyringSecret?: string;
+    readKeyringSecret?: Effect.Effect<string | undefined, AntigravityKeyringError>;
     /** Reads the OS keyring instead of `keyringSecret`. */
     nativeKeyring?: boolean;
   } = {},
@@ -140,7 +142,9 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
   const usage = yield* makeAntigravityUsageProbe({
     profileDirectory,
     authMethod: options.authMethod ?? "oauth-personal",
-    ...(options.nativeKeyring ? {} : { readKeyringSecret: Effect.succeed(options.keyringSecret) }),
+    ...(options.nativeKeyring
+      ? {}
+      : { readKeyringSecret: options.readKeyringSecret ?? Effect.succeed(options.keyringSecret) }),
   }).pipe(Effect.provideService(HttpClient.HttpClient, http));
   return { ...usage, requests, writeToken, tokenPath };
 });
@@ -724,6 +728,87 @@ describe("Antigravity subscription limits", () => {
       });
       expect((yield* expired.probe).unavailable?.reason).toBe("probeFailed");
       expect(expired.requests).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("caches a keyring sign-in until expiry and re-reads after expiry or clear", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-09T12:00:00Z")));
+      let reads = 0;
+      let expiry = "2026-10-09T13:00:00Z";
+      const { probe, clear, requests } = yield* fixture({
+        authMethod: "oauth-business",
+        missingToken: true,
+        userId: "google-user-1",
+        readKeyringSecret: Effect.sync(() => {
+          reads++;
+          return JSON.stringify({
+            token: { access_token: "access-token", refresh_token: "r", expiry },
+          });
+        }),
+      });
+      const first = yield* probe;
+      const second = yield* probe;
+      expect(reads).toBe(1);
+      expect(first.unavailable).toBeUndefined();
+      expect(second.unavailable).toBeUndefined();
+      expect(second.credentialFingerprint).toBe(first.credentialFingerprint);
+      expect(requests.filter((request) => request.url.endsWith("/userinfo"))).toHaveLength(1);
+
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-09T12:59:30Z")));
+      expiry = "2026-10-09T14:00:00Z";
+      const renewed = yield* probe;
+      expect(reads).toBe(2);
+      expect(renewed.unavailable).toBeUndefined();
+
+      yield* clear;
+      yield* probe;
+      expect(reads).toBe(3);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("remembers a keyring read denial until clear and does not cache a missing entry", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-09T12:00:00Z")));
+      let reads = 0;
+      let state: "missing" | "denied" | "valid" = "missing";
+      const { probe, clear, requests } = yield* fixture({
+        authMethod: "oauth-business",
+        missingToken: true,
+        userId: "google-user-1",
+        readKeyringSecret: Effect.gen(function* () {
+          reads++;
+          if (state === "missing") return undefined;
+          if (state === "denied") {
+            return yield* new AntigravityKeyringError({ cause: new Error("user denied") });
+          }
+          return JSON.stringify({
+            token: { access_token: "access-token", expiry: "2026-10-09T14:00:00Z" },
+          });
+        }),
+      });
+
+      expect((yield* probe).unavailable?.reason).toBe("unsupported");
+      expect(reads).toBe(1);
+
+      state = "denied";
+      const deniedFirst = yield* probe;
+      const deniedSecond = yield* probe;
+      expect(reads).toBe(2);
+      expect(deniedFirst.unavailable?.reason).toBe("probeFailed");
+      expect(deniedSecond.unavailable?.reason).toBe("probeFailed");
+      expect(deniedSecond.unavailable?.message).toMatch(/system keyring/i);
+      expect(requests).toEqual([]);
+
+      state = "valid";
+      expect((yield* probe).unavailable?.reason).toBe("probeFailed");
+      expect(reads).toBe(2);
+
+      yield* clear;
+      const recovered = yield* probe;
+      expect(reads).toBe(3);
+      expect(recovered.unavailable).toBeUndefined();
+      expect(recovered.windows).toHaveLength(4);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
