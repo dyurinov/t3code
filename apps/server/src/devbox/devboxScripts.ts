@@ -484,35 +484,6 @@ except (urllib.error.URLError, OSError, ValueError):
 `;
 
 /**
- * Reads a Cursor API key on stdin and turns on the box's Cursor provider with it. T3 watches
- * settings.json, so this takes effect without a restart; an unchanged key writes nothing.
- */
-export const INSTALL_CURSOR_SCRIPT = String.raw`import json, os, sys, tempfile
-key = sys.stdin.read().strip()
-path = os.path.expanduser("~/.t3/userdata/settings.json")
-os.makedirs(os.path.dirname(path), exist_ok=True)
-settings = json.load(open(path)) if os.path.exists(path) else {}
-instances = settings.setdefault("providerInstances", {})
-current = instances.get("cursor", {})
-environment = [v for v in current.get("environment", []) if v.get("name") != "CURSOR_API_KEY"]
-wanted = {
-    **current,
-    "driver": "cursor",
-    "displayName": current.get("displayName", "Cursor"),
-    "enabled": True,
-    "environment": environment + [{"name": "CURSOR_API_KEY", "value": key, "sensitive": True}],
-}
-if wanted != current:
-    instances["cursor"] = wanted
-    with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path), delete=False) as f:
-        json.dump(settings, f, indent=2)
-    os.replace(f.name, path)
-    print("installed")
-else:
-    print("unchanged")
-`;
-
-/**
  * Reads JSON `{gcpProject, metadataHost, brokerId}` on stdin, verifies the reverse-forwarded GCE
  * metadata broker answers with the expected `gcpProject` and `brokerId`, ensures `~/.local/bin/agy`
  * is installed from Google's verified release manifest (SHA-512 checked), and prints its path.

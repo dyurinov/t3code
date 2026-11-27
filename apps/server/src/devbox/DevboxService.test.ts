@@ -3,6 +3,7 @@ import {
   DevboxError,
   EnvironmentId,
   ProviderDriverKind,
+  ProviderInstanceEnvironmentVariableName,
   ProviderInstanceId,
   WS_METHODS,
   WsRpcGroup,
@@ -43,6 +44,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as ServerSettingsService from "../serverSettings.ts";
 import * as DevboxLogins from "./DevboxLogins.ts";
+import { PROVISION_REVISION } from "./devboxScripts.ts";
 import * as DevboxService from "./DevboxService.ts";
 import * as DevboxThreadMigration from "./DevboxThreadMigration.ts";
 import * as DevboxVertexMetadata from "./DevboxVertexMetadata.ts";
@@ -82,9 +84,8 @@ const setup = Effect.fn("test.setup")(function* (
   let generation = 0;
   const binds = yield* Queue.unbounded<string>();
   const pushes = yield* Queue.unbounded<string>();
-  const cursorPushes = yield* Queue.unbounded<{ box: string; key: string }>();
   const settingsChanges = yield* Queue.unbounded<ServerSettings>();
-  let currentSettings = DEFAULT_SERVER_SETTINGS;
+  const currentSettings = DEFAULT_SERVER_SETTINGS;
   const workspaceStates = new Map<string, "running" | "stopped">(
     stored.map(({ name }) => [name, "running"]),
   );
@@ -130,7 +131,7 @@ const setup = Effect.fn("test.setup")(function* (
         Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
         Layer.mock(SecretResolver.SecretResolver)({}),
         Layer.mock(ServerSettingsService.ServerSettingsService)({
-          getSettings: Effect.sync(() => currentSettings),
+          getSettings: Effect.succeed(currentSettings),
           subscribeChanges: Effect.succeed(Stream.fromQueue(settingsChanges)),
         }),
         Layer.mock(ServerSecretStore.ServerSecretStore)({
@@ -230,31 +231,8 @@ const setup = Effect.fn("test.setup")(function* (
               }
               if (input.command === "coder" && input.args[0] === "start") {
                 workspaceStates.set(input.args[1]!, "running");
-              }
-              if (
-                (input.command === "coder" && input.args[0] === "start") ||
-                (input.command === "coder" &&
-                  input.args[0] === "ssh" &&
-                  currentSettings.providerInstances[CURSOR_INSTANCE_ID]?.enabled === true)
-              ) {
                 return {
                   stdout: "",
-                  stderr: "",
-                  code: ChildProcessSpawner.ExitCode(0),
-                  timedOut: false,
-                  stdoutTruncated: false,
-                  stderrTruncated: false,
-                  stdoutInvalidUtf8: false,
-                  stderrInvalidUtf8: false,
-                };
-              }
-              if (input.command === "ssh" && input.args.at(-1)?.includes("CURSOR_API_KEY")) {
-                yield* Queue.offer(cursorPushes, {
-                  box: input.args.find((arg) => arg.startsWith("coder."))!.slice(6),
-                  key: typeof input.stdin === "string" ? input.stdin : "",
-                });
-                return {
-                  stdout: "installed",
                   stderr: "",
                   code: ChildProcessSpawner.ExitCode(0),
                   timedOut: false,
@@ -337,43 +315,379 @@ const setup = Effect.fn("test.setup")(function* (
     rejectedTokens,
     pushes,
     binds,
-    cursorPushes,
-    sleepBox: (box: string) =>
-      Effect.sync(() => {
-        workspaceStates.set(box, "stopped");
-      }),
-    rotateCursorKey: (key: string) =>
-      Effect.suspend(() => {
-        currentSettings = {
-          ...currentSettings,
-          providerInstances: {
-            ...currentSettings.providerInstances,
-            [CURSOR_INSTANCE_ID]: {
-              driver: ProviderDriverKind.make("cursor"),
-              enabled: true,
-              environment: [{ name: "CURSOR_API_KEY", sensitive: true, value: key }],
-            },
-          },
-        };
-        return Queue.offer(settingsChanges, currentSettings);
-      }),
   };
 });
 
 describe("devbox Cursor keys", () => {
-  it.effect("pushes the configured key to running boxes and the latest key on wake", () =>
+  it.live("pushes the configured key via scoped box RPC to running boxes and on wake", () =>
     Effect.gen(function* () {
-      const { service, sleepBox, rotateCursorKey, cursorPushes } = yield* setup([
-        spare("01-awake"),
-        spare("02-asleep"),
+      let hostSettings: ServerSettings = DEFAULT_SERVER_SETTINGS;
+      const boxSettingsByPort = new Map<string, ServerSettings>();
+      const workspaceStates = new Map<string, "running" | "stopped">([
+        ["01-awake", "running"],
+        ["02-asleep", "stopped"],
       ]);
-      yield* sleepBox("02-asleep");
-      yield* rotateCursorKey("first-key");
-      expect(yield* Queue.take(cursorPushes)).toEqual({ box: "01-awake", key: "first-key" });
-      yield* rotateCursorKey("new-key");
-      expect(yield* Queue.take(cursorPushes)).toEqual({ box: "01-awake", key: "new-key" });
-      yield* service.wake("02-asleep");
-      expect(yield* Queue.take(cursorPushes)).toEqual({ box: "02-asleep", key: "new-key" });
+      const grantedScopes: Array<AuthEnvironmentScope> = [];
+      const settingsChanges = yield* Queue.unbounded<ServerSettings>();
+      const cursorPushes = yield* Queue.unbounded<{
+        box: string;
+        operation: string;
+        key: string;
+        envNames: ReadonlyArray<string>;
+      }>();
+
+      const makeBoxServer = (boxName: string) => {
+        const allowedRpcGroup = WsRpcGroup.omit(
+          ...[...WsRpcGroup.requests.keys()].filter(
+            (
+              tag,
+            ): tag is Exclude<
+              keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
+              typeof WS_METHODS.serverGetSettings | typeof WS_METHODS.serverUpdateSettings
+            > => tag !== WS_METHODS.serverGetSettings && tag !== WS_METHODS.serverUpdateSettings,
+          ),
+        );
+        const rpcHandlers = allowedRpcGroup.toLayer({
+          [WS_METHODS.serverGetSettings]: () =>
+            Effect.sync(() => boxSettingsByPort.get(boxName) ?? DEFAULT_SERVER_SETTINGS),
+          [WS_METHODS.serverUpdateSettings]: (payload) =>
+            Effect.gen(function* () {
+              const current = boxSettingsByPort.get(boxName) ?? DEFAULT_SERVER_SETTINGS;
+              const mutation = payload.providerInstanceMutation;
+              if (
+                (mutation?.operation === "create" || mutation?.operation === "upsert") &&
+                mutation.instanceId === CURSOR_INSTANCE_ID
+              ) {
+                const next: ServerSettings = {
+                  ...current,
+                  providerInstances: {
+                    ...current.providerInstances,
+                    [mutation.instanceId]: mutation.instance,
+                  },
+                };
+                boxSettingsByPort.set(boxName, next);
+                const key =
+                  mutation.instance.environment?.find(({ name }) => name === "CURSOR_API_KEY")
+                    ?.value ?? "";
+                yield* Queue.offer(cursorPushes, {
+                  box: boxName,
+                  operation: mutation.operation,
+                  key: typeof key === "string" ? key : "",
+                  envNames: (mutation.instance.environment ?? []).map(({ name }) => name),
+                });
+                return next;
+              }
+              return current;
+            }),
+        });
+        const wsRpcEffect = RpcServer.toHttpEffectWebsocket(allowedRpcGroup).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              rpcHandlers,
+              RpcAuthorization.layer(grantedScopes),
+              RpcSerialization.layerJson,
+            ),
+          ),
+        );
+        return Effect.flatMap(wsRpcEffect, (wsHandler) => {
+          const boxRoutes = Layer.mergeAll(
+            HttpRouter.add(
+              "GET",
+              "/.well-known/t3/environment",
+              Effect.succeed(
+                HttpServerResponse.jsonUnsafe({
+                  environmentId: `environment-${boxName}`,
+                  label: boxName,
+                  serverVersion: "0.1.13",
+                }),
+              ),
+            ),
+            HttpRouter.add(
+              "POST",
+              "/api/auth/websocket-ticket/rpc",
+              Effect.succeed(HttpServerResponse.jsonUnsafe({ ticket: "box-ws-ticket" })),
+            ),
+            HttpRouter.add("GET", "/ws", wsHandler),
+          );
+          return HttpRouter.serve(boxRoutes, {
+            disableListenLog: true,
+            disableLogger: true,
+          }).pipe(Layer.provideMerge(NodeHttpServer.layerTest), Layer.build);
+        });
+      };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const awakeCtx = yield* makeBoxServer("01-awake");
+          const asleepCtx = yield* makeBoxServer("02-asleep");
+          const portOf = (ctx: typeof awakeCtx) =>
+            HttpServer.HttpServer.pipe(
+              Effect.provideContext(ctx),
+              Effect.map((server) =>
+                typeof server.address === "object" && "port" in server.address
+                  ? server.address.port
+                  : 0,
+              ),
+            );
+          const awakePort = yield* portOf(awakeCtx);
+          const asleepPort = yield* portOf(asleepCtx);
+          boxSettingsByPort.set("01-awake", {
+            ...DEFAULT_SERVER_SETTINGS,
+            providerInstances: {
+              [CURSOR_INSTANCE_ID]: {
+                driver: ProviderDriverKind.make("cursor"),
+                displayName: "My Cursor",
+                enabled: true,
+                environment: [
+                  {
+                    name: ProviderInstanceEnvironmentVariableName.make("KEEP_ME"),
+                    value: "preserved",
+                    sensitive: false,
+                  },
+                  {
+                    name: ProviderInstanceEnvironmentVariableName.make("CURSOR_API_KEY"),
+                    value: "",
+                    sensitive: true,
+                    valueRedacted: true,
+                  },
+                ],
+              },
+            },
+          });
+
+          const files = new Map([
+            [
+              "/state/userdata/devboxes.json",
+              JSON.stringify({
+                devboxes: [
+                  { ...spare("01-awake"), localPort: awakePort, provisioned: PROVISION_REVISION },
+                  {
+                    ...spare("02-asleep"),
+                    localPort: asleepPort,
+                    provisioned: PROVISION_REVISION,
+                  },
+                ],
+              }),
+            ],
+          ]);
+          const filesystem = FileSystem.layerNoop({
+            exists: (file) => Effect.succeed(files.has(file)),
+            readFileString: (file) => Effect.sync(() => files.get(file) ?? ""),
+            writeFileString: (file, text) => Effect.sync(() => void files.set(file, text)),
+            rename: (from, to) => Effect.sync(() => void files.set(to, files.get(from) ?? "")),
+            makeDirectory: () => Effect.void,
+          });
+          const service = yield* DevboxService.make.pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(
+                  ConfigProvider.fromEnv({ env: { T3CODE_DEVBOX_SPARES: "0" } }),
+                ),
+                filesystem,
+                Path.layer,
+                ServerConfig.layerTest("/checkout", "/state").pipe(
+                  Layer.provide([filesystem, Path.layer]),
+                ),
+                Layer.mock(ServerEnvironment.ServerEnvironment)({
+                  getEnvironmentId: Effect.succeed(EnvironmentId.make("host-env-1")),
+                }),
+                Layer.mock(PeerLinks.PeerLinks)({
+                  list: Effect.succeed([]),
+                  link: () =>
+                    Effect.succeed({
+                      environmentId: EnvironmentId.make("environment-02-asleep"),
+                      label: "02-asleep",
+                      status: "connected",
+                      urls: [`http://127.0.0.1:${asleepPort}`],
+                    } as never),
+                }),
+                Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+                Layer.mock(SecretResolver.SecretResolver)({}),
+                Layer.mock(ServerSettingsService.ServerSettingsService)({
+                  getSettings: Effect.sync(() => hostSettings),
+                  subscribeChanges: Effect.succeed(Stream.fromQueue(settingsChanges)),
+                }),
+                Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedNone }),
+                Layer.mock(Digest.Digest)({ digest: () => Effect.succeed(new Uint8Array(32)) }),
+                Layer.mock(NetService.NetService)({ canListenOnHost: () => Effect.succeed(true) }),
+                FetchHttpClient.layer,
+                Layer.succeed(ServerActivation, Effect.never),
+                Layer.mock(DevboxVertexMetadata.DevboxVertexMetadata)({
+                  socketPath: "",
+                  brokerId: "test-broker",
+                  hasAdcCredentials: Effect.succeed(false),
+                  getAccount: Effect.succeed(null),
+                }),
+                Layer.mock(DevboxThreadMigration.DevboxThreadMigration)({
+                  migrateFromDevbox: () =>
+                    Effect.succeed({
+                      migratedThreads: 0,
+                      skippedThreads: 0,
+                      migratedAttachments: 0,
+                    }),
+                }),
+                Layer.mock(DevboxLogins.DevboxLogins)({
+                  info: () =>
+                    Effect.succeed({
+                      signedIn: false,
+                      account: null,
+                      expiresAt: null,
+                      sealed: false,
+                    }),
+                  payload: Effect.succeed({ claude: null, codex: null }),
+                  due: () => Effect.succeedNone,
+                  generation: () => Effect.succeed(0),
+                  pendingUrl: () => Effect.succeed(null),
+                }),
+                Layer.succeed(ProcessRunner.ProcessRunner, {
+                  run: (input) =>
+                    Effect.gen(function* () {
+                      if (input.command === "coder" && input.args[0] === "list") {
+                        return {
+                          stdout: JSON.stringify(
+                            [...workspaceStates].map(([name, status]) => ({
+                              name,
+                              latest_build: { status },
+                            })),
+                          ),
+                          stderr: "",
+                          code: ChildProcessSpawner.ExitCode(0),
+                          timedOut: false,
+                          stdoutTruncated: false,
+                          stderrTruncated: false,
+                          stdoutInvalidUtf8: false,
+                          stderrInvalidUtf8: false,
+                        };
+                      }
+                      if (input.command === "coder" && input.args[0] === "start") {
+                        workspaceStates.set(input.args[1]!, "running");
+                        return {
+                          stdout: "",
+                          stderr: "",
+                          code: ChildProcessSpawner.ExitCode(0),
+                          timedOut: false,
+                          stdoutTruncated: false,
+                          stderrTruncated: false,
+                          stdoutInvalidUtf8: false,
+                          stderrInvalidUtf8: false,
+                        };
+                      }
+                      if (input.command === "coder" && input.args[0] === "ssh") {
+                        return {
+                          stdout: "",
+                          stderr: "",
+                          code: ChildProcessSpawner.ExitCode(0),
+                          timedOut: false,
+                          stdoutTruncated: false,
+                          stderrTruncated: false,
+                          stdoutInvalidUtf8: false,
+                          stderrInvalidUtf8: false,
+                        };
+                      }
+                      if (input.command === "ssh" && input.args.includes("-L")) {
+                        return yield* Effect.never;
+                      }
+                      if (input.command === "ssh" && input.args.at(-1) === "sh -s") {
+                        const script = typeof input.stdin === "string" ? input.stdin : "";
+                        if (script.includes("pair")) {
+                          return {
+                            stdout: "pair-code-123\n",
+                            stderr: "",
+                            code: ChildProcessSpawner.ExitCode(0),
+                            timedOut: false,
+                            stdoutTruncated: false,
+                            stderrTruncated: false,
+                            stdoutInvalidUtf8: false,
+                            stderrInvalidUtf8: false,
+                          };
+                        }
+                        grantedScopes.splice(
+                          0,
+                          grantedScopes.length,
+                          ...[...script.matchAll(/--scope\s+(\S+)/g)].map(
+                            (m) => m[1] as AuthEnvironmentScope,
+                          ),
+                        );
+                        return {
+                          stdout: "box-settings-token\n",
+                          stderr: "",
+                          code: ChildProcessSpawner.ExitCode(0),
+                          timedOut: false,
+                          stdoutTruncated: false,
+                          stderrTruncated: false,
+                          stdoutInvalidUtf8: false,
+                          stderrInvalidUtf8: false,
+                        };
+                      }
+                      if (input.command === "ssh" && input.args.at(-1)?.startsWith("python3 -c")) {
+                        return {
+                          stdout: JSON.stringify({}),
+                          stderr: "",
+                          code: ChildProcessSpawner.ExitCode(0),
+                          timedOut: false,
+                          stdoutTruncated: false,
+                          stderrTruncated: false,
+                          stdoutInvalidUtf8: false,
+                          stderrInvalidUtf8: false,
+                        };
+                      }
+                      return yield* Effect.never;
+                    }),
+                }),
+              ),
+            ),
+          );
+
+          const rotateCursorKey = (key: string) =>
+            Effect.suspend(() => {
+              hostSettings = {
+                ...hostSettings,
+                providerInstances: {
+                  ...hostSettings.providerInstances,
+                  [CURSOR_INSTANCE_ID]: {
+                    driver: ProviderDriverKind.make("cursor"),
+                    enabled: true,
+                    environment: [
+                      {
+                        name: ProviderInstanceEnvironmentVariableName.make("CURSOR_API_KEY"),
+                        sensitive: true,
+                        value: key,
+                      },
+                    ],
+                  },
+                },
+              };
+              return Queue.offer(settingsChanges, hostSettings);
+            });
+
+          yield* rotateCursorKey("first-key");
+          expect(yield* Queue.take(cursorPushes)).toEqual({
+            box: "01-awake",
+            operation: "upsert",
+            key: "first-key",
+            envNames: ["KEEP_ME", "CURSOR_API_KEY"],
+          });
+          expect(
+            boxSettingsByPort.get("01-awake")?.providerInstances[CURSOR_INSTANCE_ID]?.displayName,
+          ).toBe("My Cursor");
+
+          yield* rotateCursorKey("new-key");
+          expect(yield* Queue.take(cursorPushes)).toEqual({
+            box: "01-awake",
+            operation: "upsert",
+            key: "new-key",
+            envNames: ["KEEP_ME", "CURSOR_API_KEY"],
+          });
+
+          yield* service.wake("02-asleep");
+          expect(yield* Queue.take(cursorPushes)).toEqual({
+            box: "02-asleep",
+            operation: "create",
+            key: "new-key",
+            envNames: ["CURSOR_API_KEY"],
+          });
+        }),
+      );
     }),
   );
 });

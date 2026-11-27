@@ -74,7 +74,6 @@ import {
   ACTIVE_RUN_SCRIPT,
   FENCE_T3_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
-  INSTALL_CURSOR_SCRIPT,
   INSTALL_PERSONALIZATION_SCRIPT,
   PREPARE_ANTIGRAVITY_SCRIPT,
   REFRESH_LOGIN_SCRIPT,
@@ -237,6 +236,8 @@ export class DevboxService extends Context.Service<
 const PORT_BASE = 13800;
 const HOST_LINK_ACCESS = "auto";
 const CURSOR_INSTANCE_ID = ProviderInstanceId.make("cursor");
+const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
+const CURSOR_API_KEY_ENV_NAME = ProviderInstanceEnvironmentVariableName.make("CURSOR_API_KEY");
 const ANTIGRAVITY_INSTANCE_ID = ProviderInstanceId.make("antigravity");
 const ANTIGRAVITY_DRIVER_KIND = ProviderDriverKind.make("antigravity");
 const VERTEX_METADATA_ENV_NAME = ProviderInstanceEnvironmentVariableName.make("GCE_METADATA_HOST");
@@ -1259,17 +1260,60 @@ export const make = Effect.gen(function* () {
     return key || Option.getOrUndefined(yield* browserCursorApiKey);
   });
   const installCursor = Effect.fn("DevboxService.installCursor")(
-    function* (name: string) {
+    function* (record: DevboxRecord) {
       // Read under the box lock so a delayed push cannot overwrite a newer key.
       const key = yield* readCursorApiKey();
-      if (!key || pushedCursorKeys.get(name) === key) return;
-      pushedCursorKeys.delete(name);
-      yield* ssh(name, `python3 -c ${shellQuote(INSTALL_CURSOR_SCRIPT)}`, key, "1 minute");
-      pushedCursorKeys.set(name, key);
+      if (!key || pushedCursorKeys.get(record.name) === key) return;
+      pushedCursorKeys.delete(record.name);
+      const token = lastLine(yield* ssh(record.name, "sh -s", SETTINGS_TOKEN_SCRIPT));
+      if (!token) {
+        return yield* new DevboxError({
+          reason: "provision",
+          message: "The box did not return a settings token.",
+        });
+      }
+      // Apply through the box's serialized RPC so CURSOR_API_KEY lands in ServerSecretStore
+      // immediately (redacted on disk) instead of writing plaintext settings.json over SSH.
+      yield* boxRpc(record, token, (rpc) =>
+        Effect.gen(function* () {
+          const boxSettings = yield* rpc[WS_METHODS.serverGetSettings]({});
+          const current = boxSettings.providerInstances[CURSOR_INSTANCE_ID];
+          const remainingEnv = (current?.environment ?? []).filter(
+            (entry) => entry.name !== CURSOR_API_KEY_ENV_NAME,
+          );
+          yield* rpc[WS_METHODS.serverUpdateSettings]({
+            patch: {},
+            providerInstanceMutation: {
+              operation: current === undefined ? "create" : "upsert",
+              instanceId: CURSOR_INSTANCE_ID,
+              instance: {
+                ...current,
+                driver: CURSOR_DRIVER_KIND,
+                displayName: current?.displayName ?? "Cursor",
+                enabled: true,
+                environment: [
+                  ...remainingEnv,
+                  {
+                    name: CURSOR_API_KEY_ENV_NAME,
+                    value: key,
+                    sensitive: true,
+                  },
+                ],
+              },
+            },
+          });
+        }),
+      );
+      pushedCursorKeys.set(record.name, key);
     },
-    (effect, name) =>
+    (effect, record) =>
       effect.pipe(
-        Effect.catch(() => Effect.logWarning("devbox Cursor key could not be synced", { name })),
+        Effect.catch((error) =>
+          Effect.logWarning("devbox Cursor key could not be synced", {
+            name: record.name,
+            error,
+          }),
+        ),
       ),
   );
   const syncCursor = Effect.fn("DevboxService.syncCursor")(
@@ -1279,24 +1323,27 @@ export const make = Effect.gen(function* () {
       const inventory = all ?? (yield* workspaces);
       const held = new Set(yield* locks.activeKeys);
       const running = [...(yield* Ref.get(records)).values()].filter(
-        ({ name }) =>
-          inventory.get(name)?.latest_build.status === "running" &&
-          pushedCursorKeys.get(name) !== key &&
-          !held.has(name),
+        (record) =>
+          record.environmentId !== null &&
+          inventory.get(record.name)?.latest_build.status === "running" &&
+          pushedCursorKeys.get(record.name) !== key &&
+          !held.has(record.name),
       );
       yield* Effect.forEach(
         running,
-        ({ name }) =>
+        (record) =>
           locks.withLock(
-            name,
+            record.name,
             Effect.gen(function* () {
-              const state = (yield* Ref.get(transient)).get(name)?.state;
+              const latest = (yield* Ref.get(records)).get(record.name);
+              const state = (yield* Ref.get(transient)).get(record.name)?.state;
               if (
-                (yield* Ref.get(records)).has(name) &&
+                latest !== undefined &&
+                latest.environmentId !== null &&
                 state !== "stopping" &&
                 state !== "deleting"
               )
-                yield* installCursor(name);
+                yield* installCursor(latest);
             }),
           ),
         { concurrency: 4, discard: true },
@@ -1703,7 +1750,6 @@ export const make = Effect.gen(function* () {
       // The startup script (codez refresh, full redeploy) can run for over 30 minutes; agents
       // only need ssh and the checkout, so connect as soon as the box's agent answers.
       yield* coder(["ssh", "--wait=no", stored.name, "--", "true"], "10 minutes");
-      yield* installCursor(stored.name);
       yield* installPersonalization(stored.name);
       // This box can renew a due sign-in itself, so a waking box gets a fresh token at once.
       // A renewal here changes every box's token; the others get it in the background.
@@ -1725,7 +1771,10 @@ export const make = Effect.gen(function* () {
           Effect.as(true),
           Effect.orElseSucceed(() => false),
         );
-        if (reached) return yield* link(record);
+        if (reached) {
+          yield* installCursor(record);
+          return yield* link(record);
+        }
       }
       const version = yield* t3Version;
       yield* ssh(
@@ -1739,6 +1788,7 @@ export const make = Effect.gen(function* () {
         provisioned: PROVISION_REVISION,
       }));
       yield* startTunnel(provisioned);
+      yield* installCursor(provisioned);
       return yield* link(provisioned);
     },
     (effect, stored) =>
@@ -2757,7 +2807,6 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
   yield* Ref.set(history, stored.history ?? []);
   const reconnect = Effect.gen(function* () {
     const all = yield* workspaces;
-    yield* syncCursor(all);
     const ordered = [...(yield* Ref.get(records)).values()].toSorted(
       (a, b) => Number(b.spare === true) - Number(a.spare === true),
     );
