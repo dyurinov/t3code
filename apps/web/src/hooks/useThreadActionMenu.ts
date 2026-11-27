@@ -21,7 +21,8 @@ import { msg } from "gt-react";
 import { pickSnoozePreset, resolveSnoozePresets } from "../components/Sidebar.snooze";
 import {
   buildThreadActionMenuItems,
-  isThreadOrganizationAction,
+  canMarkLatestRunUnread,
+  isThreadTriageAction,
   threadActionRequiresOperate,
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
@@ -30,12 +31,8 @@ import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { copyThreadReference } from "../lib/copyThreadReference";
 import { m } from "../i18n/messages";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
-import {
-  threadEnvironment,
-  readCanOrganizeThread,
-  readThreadOrganizationSupported,
-} from "../state/threads";
-import { useOrchestrationCommand } from "../state/use-orchestration-command";
+import { threadEnvironment } from "../state/threads";
+import { threadTriagePermitted, useOrchestrationCommand } from "../state/use-orchestration-command";
 import { readEnvironmentScope } from "../state/session";
 import {
   readEnvironmentServerConfigLoaded,
@@ -129,9 +126,9 @@ export function useThreadActionMenu(input: {
     const now = new Date();
     const configLoaded = readEnvironmentServerConfigLoaded(threadRef.environmentId);
     const supports = {
-      settlement: readThreadOrganizationSupported(threadRef.environmentId),
+      settlement: configLoaded,
       autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
-      snooze: readThreadOrganizationSupported(threadRef.environmentId),
+      snooze: configLoaded,
       pinning: configLoaded,
       titleRegeneration: configLoaded,
     };
@@ -139,7 +136,7 @@ export function useThreadActionMenu(input: {
     const snoozePresets = resolveSnoozePresets(now, timestampFormat, threadRef.environmentId);
     const items = buildThreadActionMenuItems({
       canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
-      canOrganize: readCanOrganizeThread(threadRef.environmentId),
+      canTriage: threadTriagePermitted(threadRef.environmentId),
       canFind: onFind !== undefined,
       canRename: onStartRename !== undefined,
       branch: thread.branch ?? null,
@@ -151,7 +148,7 @@ export function useThreadActionMenu(input: {
       canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
       isRegeneratingTitle,
       isRunning: !threadRuntimeCanArchive(thread.runtime),
-      hasCompletedRun: thread.latestRun?.completedAt != null,
+      hasCompletedRun: canMarkLatestRunUnread(thread.latestRun),
       supports,
       snoozePresets,
       canShareWithGuest,
@@ -162,8 +159,8 @@ export function useThreadActionMenu(input: {
       if (!api) return;
       if (
         threadActionRequiresOperate(action) &&
-        !(isThreadOrganizationAction(action)
-          ? readCanOrganizeThread(threadRef.environmentId)
+        !(isThreadTriageAction(action)
+          ? threadTriagePermitted(threadRef.environmentId)
           : readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope))
       ) {
         failureToast(

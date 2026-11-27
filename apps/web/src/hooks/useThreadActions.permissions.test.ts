@@ -70,6 +70,8 @@ vi.mock("../state/session", () => ({
   environmentSession: { sessionStateAtom: "session" },
   readEnvironmentScope: (environmentId: string, scope: string) =>
     state.scopes.get(environmentId)?.has(scope) === true,
+  readEnvironmentScopeDenied: (environmentId: string, scope: string) =>
+    state.scopes.get(environmentId)?.has(scope) !== true,
 }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand:
@@ -111,9 +113,6 @@ vi.mock("../state/server", async (importOriginal) => {
   };
 });
 vi.mock("../state/threads", () => ({
-  readThreadOrganizationSupported: () => true,
-  readCanOrganizeThread: (id: string) =>
-    state.scopes.get(id)?.has(AuthOrchestrationOperateScope) === true,
   threadEnvironment: Object.fromEntries(
     [
       "archive",

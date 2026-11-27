@@ -95,7 +95,8 @@ export function buildDraftActionMenuItems(
 
 export interface ThreadActionMenuState {
   readonly canOperate: boolean;
-  readonly canOrganize?: boolean;
+  /** Settle, snooze and their undo stay available until the host denies the operate scope. */
+  readonly canTriage?: boolean;
   readonly canFind?: boolean;
   /** False where no inline title editor is rendered, such as sidebar search results. */
   readonly canRename?: boolean;
@@ -144,12 +145,22 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
   ].includes(action);
 }
 
-export function isThreadOrganizationAction(action: string): boolean {
+/**
+ * The server marks unread against the latest run's completion, and a stopped run never reads as
+ * unread, so only a run that finished on its own can be marked unread.
+ */
+export function canMarkLatestRunUnread(
+  run: { readonly status: string; readonly completedAt?: string | null } | null | undefined,
+): boolean {
+  return run?.completedAt != null && run.status !== "interrupted" && run.status !== "cancelled";
+}
+
+export function isThreadTriageAction(action: string): boolean {
   return (
     action === "settle" ||
     action === "unsettle" ||
-    action === "unsnooze" ||
     action === "snooze" ||
+    action === "unsnooze" ||
     action.startsWith("snooze:")
   );
 }
@@ -327,7 +338,7 @@ export function buildThreadActionMenuItems(
     ? items
     : items.map((item) =>
         threadActionRequiresOperate(item.id) &&
-        !(state.canOrganize && isThreadOrganizationAction(item.id))
+        !(state.canTriage === true && isThreadTriageAction(item.id))
           ? {
               ...item,
               disabled: true,

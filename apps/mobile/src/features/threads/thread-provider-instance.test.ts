@@ -307,18 +307,3 @@ describe("thread list reorder availability", () => {
     },
   );
 });
-
-it("offers organization for a sleeping environment before its config loads", () => {
-  const registry = AtomRegistry.make();
-  using _registry = { [Symbol.dispose]: () => registry.dispose() };
-  const id = EnvironmentId.make("sleeping-devbox");
-  const configs = Atom.make<ReadonlyMap<EnvironmentId, ServerConfig>>(new Map());
-  const offline = Atom.make<ReadonlyArray<EnvironmentId>>([id]);
-  const environments = createThreadListEnvironmentsAtom(configs, Atom.make([]), offline);
-  registry.mount(environments);
-  expect(registry.get(environments).settlementEnvironmentIds.has(id)).toBe(true);
-  expect(registry.get(environments).snoozeEnvironmentIds.has(id)).toBe(true);
-  expect(registry.get(environments).pinReorderEnvironmentIds.has(id)).toBe(false);
-  registry.set(offline, []);
-  expect(registry.get(environments).settlementEnvironmentIds.has(id)).toBe(false);
-});

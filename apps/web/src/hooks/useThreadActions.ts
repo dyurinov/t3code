@@ -32,7 +32,7 @@ import { environmentServerConfigsAtom } from "../state/server";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { orchestrationEnvironment } from "../state/orchestration";
 import { projectEnvironment } from "../state/projects";
-import { threadEnvironment, readThreadOrganizationSupported } from "../state/threads";
+import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
@@ -62,10 +62,7 @@ import { useClientSettings } from "./useSettings";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
-import {
-  useOrchestrationCommand,
-  useThreadOrganizationCommand,
-} from "../state/use-orchestration-command";
+import { threadTriagePermitted, useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
@@ -313,16 +310,20 @@ export function useThreadActions() {
   const deleteThreadMutation = useOrchestrationCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
-  const settleThreadMutation = useThreadOrganizationCommand(threadEnvironment.settle, {
+  const settleThreadMutation = useOrchestrationCommand(
+    threadEnvironment.settle,
+    { reportFailure: false },
+    threadTriagePermitted,
+  );
+  const unsettleThreadMutation = useOrchestrationCommand(
+    threadEnvironment.unsettle,
+    { reportFailure: false },
+    threadTriagePermitted,
+  );
+  const pinThreadMutation = useOrchestrationCommand(threadEnvironment.pin, {
     reportFailure: false,
   });
-  const unsettleThreadMutation = useThreadOrganizationCommand(threadEnvironment.unsettle, {
-    reportFailure: false,
-  });
-  const pinThreadMutation = useThreadOrganizationCommand(threadEnvironment.pin, {
-    reportFailure: false,
-  });
-  const unpinThreadMutation = useThreadOrganizationCommand(threadEnvironment.unpin, {
+  const unpinThreadMutation = useOrchestrationCommand(threadEnvironment.unpin, {
     reportFailure: false,
   });
   const setThreadAutoSettleMutation = useOrchestrationCommand(threadEnvironment.setAutoSettle, {
@@ -331,18 +332,19 @@ export function useThreadActions() {
   const reorderPinnedThreadMutation = useOrchestrationCommand(threadEnvironment.reorderPin, {
     reportFailure: false,
   });
-  const reorderActiveThreadMutation = useThreadOrganizationCommand(
-    threadEnvironment.reorderActive,
-    {
-      reportFailure: false,
-    },
+  const reorderActiveThreadMutation = useOrchestrationCommand(threadEnvironment.reorderActive, {
+    reportFailure: false,
+  });
+  const snoozeThreadMutation = useOrchestrationCommand(
+    threadEnvironment.snooze,
+    { reportFailure: false },
+    threadTriagePermitted,
   );
-  const snoozeThreadMutation = useThreadOrganizationCommand(threadEnvironment.snooze, {
-    reportFailure: false,
-  });
-  const unsnoozeThreadMutation = useThreadOrganizationCommand(threadEnvironment.unsnooze, {
-    reportFailure: false,
-  });
+  const unsnoozeThreadMutation = useOrchestrationCommand(
+    threadEnvironment.unsnooze,
+    { reportFailure: false },
+    threadTriagePermitted,
+  );
   const markThreadUnread = useMarkThreadUnread();
   const createProjectFromThread = useAtomCommand(projectEnvironment.createFromThread, {
     reportFailure: false,
@@ -743,7 +745,7 @@ export function useThreadActions() {
   };
 
   const unsettleThread = async (target: ScopedThreadRef, restoreUnsettledAt?: string | null) => {
-    if (!readThreadOrganizationSupported(target.environmentId)) {
+    if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadSettlementUnsupportedError({
@@ -783,7 +785,7 @@ export function useThreadActions() {
   };
 
   const sendPin = async (target: ScopedThreadRef, opts: { orderKey?: string } = {}) => {
-    if (!readThreadOrganizationSupported(target.environmentId)) {
+    if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadPinningUnsupportedError({
@@ -814,7 +816,7 @@ export function useThreadActions() {
   };
 
   const unpinThread = async (target: ScopedThreadRef) => {
-    if (!readThreadOrganizationSupported(target.environmentId)) {
+    if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadPinningUnsupportedError({
@@ -845,7 +847,7 @@ export function useThreadActions() {
   };
 
   const settleThread = async (target: ScopedThreadRef) => {
-    if (!readThreadOrganizationSupported(target.environmentId)) {
+    if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadSettlementUnsupportedError({
@@ -939,7 +941,7 @@ export function useThreadActions() {
   };
 
   const unsnoozeThread = async (target: ScopedThreadRef) => {
-    if (!readThreadOrganizationSupported(target.environmentId)) {
+    if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadSnoozeUnsupportedError({
@@ -957,7 +959,7 @@ export function useThreadActions() {
   };
 
   const snoozeThread = async (target: ScopedThreadRef, snoozedUntil: string) => {
-    if (!readThreadOrganizationSupported(target.environmentId)) {
+    if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadSnoozeUnsupportedError({
@@ -996,13 +998,24 @@ export function useThreadActions() {
     return result;
   };
 
-  const runUndoPlan = (target: ScopedThreadRef, plan: ThreadUndo.ThreadUndoPlan) =>
-    ThreadUndo.executeThreadUndo(
+  const runUndoPlan = (target: ScopedThreadRef, plan: ThreadUndo.ThreadUndoPlan) => {
+    let cancelledOnDevice = false;
+    return ThreadUndo.executeThreadUndo(
       plan,
       async (step) => {
+        if (
+          cancelledOnDevice &&
+          !ThreadUndo.restoresAfterDeviceCancel(step, readThreadShell(target))
+        ) {
+          return AsyncResult.success(undefined);
+        }
         switch (step.action) {
-          case "unsettle":
-            return unsettleThread(target, step.restoreUnsettledAt);
+          case "unsettle": {
+            const result = await unsettleThread(target, step.restoreUnsettledAt);
+            cancelledOnDevice =
+              result._tag === "Success" && ThreadUndo.cancelledOnDevice(result.value);
+            return result;
+          }
           case "unsnooze":
             return unsnoozeThread(target);
           case "pin":
@@ -1018,6 +1031,7 @@ export function useThreadActions() {
       },
       (result) => result._tag === "Success",
     );
+  };
 
   const confirmAndDeleteThread = async (target: ScopedThreadRef, knownTitle?: string) => {
     const permissionFailure = threadOperationFailure(target);

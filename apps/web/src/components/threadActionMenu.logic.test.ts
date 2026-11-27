@@ -27,17 +27,12 @@ const baseState: ThreadActionMenuState = {
 };
 
 describe("buildThreadActionMenuItems", () => {
-  it.each(
-    [false, true].flatMap((reversed) =>
-      [false, true].map((canOrganize) => ({ reversed, canOrganize })),
-    ),
-  )(
-    "keeps destructive operations disabled when only organization is allowed ($reversed/$canOrganize)",
-    ({ reversed, canOrganize }) => {
+  it.each([false, true])(
+    "disables both lifecycle directions without permission (reversed: %s)",
+    (reversed) => {
       const items = buildThreadActionMenuItems({
         ...baseState,
         canOperate: false,
-        canOrganize,
         isPinned: reversed,
         isSettled: reversed,
         isSnoozed: reversed,
@@ -63,15 +58,11 @@ describe("buildThreadActionMenuItems", () => {
             "archive",
             "delete",
           ];
-      expect(items.filter((item) => item.disabled).map((item) => item.id)).toEqual(
-        canOrganize
-          ? expected.filter((id) => !["settle", "unsettle", "snooze", "unsnooze"].includes(id))
-          : expected,
-      );
+      expect(items.filter((item) => item.disabled).map((item) => item.id)).toEqual(expected);
       expect(
         items.find((item) => item.id === "snooze")?.children?.every((child) => child.disabled) ??
           true,
-      ).toBe(reversed || !canOrganize);
+      ).toBe(true);
     },
   );
 

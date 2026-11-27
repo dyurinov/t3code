@@ -15,13 +15,6 @@ import {
 import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { msg } from "gt-react";
-
-import { randomUUID } from "../lib/utils";
-import { toastManager } from "../components/ui/toast";
-import { m } from "../i18n/messages";
-
-import { appAtomRegistry } from "../rpc/atomRegistry";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -39,18 +32,7 @@ export const olderSettledThreads = createOlderSettledThreadAtoms(
 export const threadEnvironment = createThreadEnvironmentAtoms(
   connectionAtomRuntime,
   threadFamilies.snapshotAtom,
-  {
-    load: async (id) => window.localStorage.getItem(`t3code:offline-thread-actions:${id}`),
-    save: async (id, value) =>
-      window.localStorage.setItem(`t3code:offline-thread-actions:${id}`, value),
-    uuid: randomUUID,
-    onError: (error) =>
-      toastManager.add({
-        type: "error",
-        title: m(msg("Could not synchronize thread organization")),
-        description: error instanceof Error ? error.message : String(error),
-      }),
-  },
+  environmentShell.statusAtom,
 );
 const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
 export const environmentThreadStateAtom = environmentThreads.stateAtom;
@@ -151,18 +133,3 @@ export const runningThreadKeepAliveAtom = createRunningThreadKeepAliveAtom({
   threadsAtom: environmentThreadShells.environmentThreadsAtom,
   stateAtom: environmentThreads.stateAtom,
 });
-
-export function useCanOrganizeThread(environmentId: EnvironmentId): boolean {
-  return useAtomValue(threadEnvironment.canOrganizeAtom(environmentId));
-}
-
-export function readCanOrganizeThread(environmentId: EnvironmentId): boolean {
-  return appAtomRegistry.get(threadEnvironment.canOrganizeAtom(environmentId));
-}
-
-export function readThreadOrganizationSupported(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(threadEnvironment.offlineAtom(environmentId)) ||
-    appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId)) !== null
-  );
-}
