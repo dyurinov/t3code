@@ -6,11 +6,24 @@ import {
   type TimelineEntriesProjection,
 } from "../session-logic";
 
+function sameArray<T>(
+  left: ReadonlyArray<T> | undefined,
+  right: ReadonlyArray<T> | undefined,
+): boolean {
+  return (
+    left === right ||
+    (left !== undefined &&
+      right !== undefined &&
+      left.length === right.length &&
+      left.every((item, index) => item === right[index]))
+  );
+}
+
 function sameInput(left: TimelineEntriesInput, right: TimelineEntriesInput): boolean {
   return (
     left.visibleTurnItems === right.visibleTurnItems &&
-    left.optimisticMessages === right.optimisticMessages &&
-    left.anchoredMessages === right.anchoredMessages &&
+    sameArray(left.optimisticMessages, right.optimisticMessages) &&
+    sameArray(left.anchoredMessages, right.anchoredMessages) &&
     left.attachmentUrlById === right.attachmentUrlById &&
     left.attempts === right.attempts &&
     left.nodes === right.nodes &&

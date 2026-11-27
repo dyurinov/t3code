@@ -1134,9 +1134,9 @@ export function useComposerSend(input: ComposerSendInput) {
       sendQueuesBehindSetup,
       isServerThread,
       activeMessageCount,
-      sendEnvMode,
-      worktreePath: activeThread.worktreePath,
-      activeThreadBranch,
+      sendEnvMode: newDevboxDraft ? "local" : sendEnvMode,
+      worktreePath: newDevboxDraft ? null : activeThread.worktreePath,
+      activeThreadBranch: newDevboxDraft ? null : activeThreadBranch,
       projectIsGitRepo: isGitRepo,
       plainProjectBaseBranch: readWorktreeBaseBranch(activeProject),
       isScratchProject: activeProjectIsScratch,
@@ -1649,7 +1649,7 @@ export function useComposerSend(input: ComposerSendInput) {
         const store = useComposerDraftStore.getState();
         store.setDraftThreadContext(draftId, {
           projectRef: scopeProjectRef(environmentId, activeProject.id),
-          branch: activeThreadBranch,
+          branch: null,
           worktreePath: null,
           environmentSelection: "manual",
         });
@@ -1799,7 +1799,7 @@ export function useComposerSend(input: ComposerSendInput) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode: DEFAULT_INTERACTION_MODE,
-                      branch: activeThreadBranch,
+                      branch: newDevboxDraft ? null : activeThreadBranch,
                       worktreePath: newDevboxDraft ? null : activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
                     },

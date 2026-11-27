@@ -17,6 +17,18 @@ export type DevboxClaimState =
 
 const idle: DevboxClaimState = { kind: "idle" };
 
+/** Whether a draft targets a new devbox rather than its current environment. */
+export function isDraftAwaitingNewDevbox(
+  claim: DevboxClaimState,
+  environmentId: EnvironmentId,
+): boolean {
+  return (
+    claim.kind === "preparing" ||
+    claim.kind === "failed" ||
+    (claim.kind === "ready" && claim.environmentId !== environmentId)
+  );
+}
+
 export function createDevboxClaims() {
   const claimsAtom = Atom.make<ReadonlyMap<string, DevboxClaimState>>(new Map()).pipe(
     Atom.keepAlive,

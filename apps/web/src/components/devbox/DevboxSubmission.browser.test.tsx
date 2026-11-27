@@ -20,6 +20,7 @@ import {
   PROJECT_ID,
   answerRpc,
   dispatchedCommands,
+  emitVcsStatus,
   installFakeEnvironment,
   threadWithHistory,
   type FakeDriver,
@@ -57,16 +58,23 @@ it("shows devbox creation in the sidebar and keeps sending after navigating to a
   const draftId = DraftId.make("devbox-submission");
   const threadId = ThreadId.make("devbox-thread");
   const store = useComposerDraftStore.getState();
-  store.setProjectDraftThreadId(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), draftId, { threadId });
+  store.setProjectDraftThreadId(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), draftId, {
+    threadId,
+    branch: "stale/local-branch",
+  });
   store.setPrompt(draftId, "Work on my new devbox");
   devboxClaims.set(appAtomRegistry, draftId, { kind: "preparing", submitted: false });
   using _claim = {
     [Symbol.dispose]: () => devboxClaims.set(appAtomRegistry, draftId, { kind: "idle" }),
   };
-  const launches: Array<{ threadId: string; initialMessage: { text: string } }> = [];
+  const launches: Array<{
+    threadId: string;
+    branch?: string | null;
+    initialMessage: { text: string };
+  }> = [];
   using _launch = answerRpc(
     ORCHESTRATION_V2_WS_METHODS.launchThread,
-    (input: { threadId: string; initialMessage: { text: string } }) => {
+    (input: { threadId: string; branch?: string | null; initialMessage: { text: string } }) => {
       launches.push(input);
       return Effect.fail(new SetupFailure());
     },
@@ -80,6 +88,20 @@ it("shows devbox creation in the sidebar and keeps sending after navigating to a
   const editor = page.getByTestId("composer-editor");
   await expect.element(editor).toHaveTextContent("Work on my new devbox");
   await expect.element(page.getByText("render", { exact: true }).first()).toBeVisible();
+  await emitVcsStatus({
+    _tag: "snapshot",
+    local: {
+      isRepo: true,
+      hasPrimaryRemote: false,
+      isDefaultRef: false,
+      refName: "stale/local-branch",
+      hasWorkingTreeChanges: false,
+      workingTree: { files: [], insertions: 0, deletions: 0 },
+    },
+    remote: null,
+  });
+  await expect.element(page.getByText("Preparing devbox…", { exact: true }).first()).toBeVisible();
+  expect(page.getByText("stale/local-branch").elements()).toHaveLength(0);
   await userEvent.click(editor);
   await userEvent.keyboard("{Enter}");
   const row = screen.getByTestId("sidebar-devbox-send-row");
@@ -103,6 +125,15 @@ it("shows devbox creation in the sidebar and keeps sending after navigating to a
     ),
   );
   await expect.element(row).toBeVisible();
+
+  // Reopening a draft that is still setting up its devbox must render cleanly without looping.
+  await userEvent.click(row);
+  await vi.waitFor(() => expect(router.state.location.pathname).toBe(`/draft/${draftId}`));
+  await expect.element(page.getByText("Work on my new devbox").first()).toBeVisible();
+  expect(page.getByText("stale/local-branch").elements()).toHaveLength(0);
+
+  await router.navigate({ to: `/${ENVIRONMENT_ID}/${other.id}` });
+  await expect.element(page.getByText(`Answer 0 for ${other.id}.`)).toBeVisible();
   await act(() =>
     devboxClaims.set(appAtomRegistry, draftId, {
       kind: "ready",
@@ -116,6 +147,7 @@ it("shows devbox creation in the sidebar and keeps sending after navigating to a
     threadId,
     initialMessage: { text: "Work on my new devbox" },
   });
+  expect(launches[0]?.branch ?? null).toBeNull();
   await vi.waitFor(() => expect(appAtomRegistry.get(devboxSendWaitsAtom).size).toBe(0));
   expect(router.state.location.pathname).toBe(`/${ENVIRONMENT_ID}/${other.id}`);
   expect(store.getComposerDraft(draftId)?.prompt).toBe("Work on my new devbox");

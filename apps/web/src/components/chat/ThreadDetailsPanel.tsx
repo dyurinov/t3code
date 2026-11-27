@@ -36,6 +36,8 @@ import {
 import { ThreadDetailsItemsMenuItems } from "./ThreadDetailsItemsMenu";
 import { resolveThreadDetailsVisibility, THREAD_DETAILS_ITEMS } from "./threadDetailsItems";
 import { useClientSettings } from "../../hooks/useSettings";
+import { isDraftAwaitingNewDevbox } from "../../state/devboxClaims";
+import { useDevboxClaim } from "../../state/devboxes";
 import { useProject, useServerConfigs } from "../../state/entities";
 import { filesystemEnvironment } from "../../state/filesystem";
 import { useEnvironmentQuery } from "../../state/query";
@@ -122,9 +124,14 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
   const taskFolder = taskFolderQuery.data?.taskFolder ?? null;
   // A task folder's plain project directory can sit inside someone else's repository.
   const folderIsRepo = props.isGitRepo && taskFolder?.projectIsWorktree !== false;
+  const [devboxClaim] = useDevboxClaim(props.draftId ?? null);
+  const awaitingNewDevbox =
+    !props.isServerThread && isDraftAwaitingNewDevbox(devboxClaim, props.environmentId);
   // A No project thread's folder sits inside the shared scratch root, so it must never get git.
   // Until the config and project load, a No project thread looks like any other folder.
+  // A draft targeting a new devbox has no checkout on the old environment to inspect.
   const offersGit =
+    !awaitingNewDevbox &&
     props.gitCwd !== null &&
     serverConfig !== undefined &&
     project !== null &&
@@ -190,7 +197,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
           scripts: visible.scripts && props.activeProjectScripts !== undefined,
           branch: offersGit && folderIsRepo && visible.branch,
           // Without a branch selector, linked pull requests still need somewhere to show.
-          pullRequests: !(offersGit && folderIsRepo) && visible.branch,
+          pullRequests: !awaitingNewDevbox && !(offersGit && folderIsRepo) && visible.branch,
           // A plain folder that tracks repositories is not asked to become one itself.
           git:
             offersGit &&

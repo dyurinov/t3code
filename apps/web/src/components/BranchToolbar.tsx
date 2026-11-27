@@ -56,6 +56,7 @@ import {
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { devboxClaimLabel, useNewDevbox } from "./devbox/useNewDevbox";
+import { isDraftAwaitingNewDevbox } from "../state/devboxClaims";
 import { useDevboxClaim } from "../state/devboxes";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
@@ -702,6 +703,12 @@ export const BranchToolbar = memo(function BranchToolbar({
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (isServerThread && activeWorktreePath !== null);
 
+  const newDevbox = useNewDevbox(draftId ?? null);
+  const [, setDevboxClaim] = useDevboxClaim(draftId ?? null);
+  const claim = newDevbox.state;
+  const awaitingNewDevbox = !isServerThread && isDraftAwaitingNewDevbox(claim, environmentId);
+  const effectiveShowGitControls = showGitControls && !awaitingNewDevbox;
+  const effectiveShowBranchControls = showBranchControls && !awaitingNewDevbox;
   const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
   const projectRefsForWorktreeLookup = canUsePreviousWorktree ? [activeProjectRef] : [];
   const projectThreads = useThreadShellsForProjectRefs(projectRefsForWorktreeLookup);
@@ -729,28 +736,25 @@ export const BranchToolbar = memo(function BranchToolbar({
     () => ({
       openBranchPicker: () => branchSelectorRef.current?.open(),
       usePreviousWorktree: () => {
-        if (!showGitControls || !canUsePreviousWorktree || !previousWorktreeSeed) return;
+        if (!effectiveShowGitControls || !canUsePreviousWorktree || !previousWorktreeSeed) return;
         onUsePreviousWorktree();
         onComposerFocusRequest?.();
       },
     }),
     [
       canUsePreviousWorktree,
+      effectiveShowGitControls,
       onComposerFocusRequest,
       onUsePreviousWorktree,
       previousWorktreeSeed,
-      showGitControls,
     ],
   );
 
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
-  const newDevbox = useNewDevbox(draftId ?? null);
-  const [, setDevboxClaim] = useDevboxClaim(draftId ?? null);
   const onNewDevbox =
     newDevbox.available && onEnvironmentChange !== undefined && !envLocked
       ? () => void newDevbox.start()
       : undefined;
-  const claim = newDevbox.state;
   const claimedEnvironmentId = claim.kind === "ready" ? claim.environmentId : null;
   // The box's project loads a moment after this client connects; the draft can move only then.
   const claimedListed =
@@ -779,7 +783,10 @@ export const BranchToolbar = memo(function BranchToolbar({
   // A project on one machine still gets the picker when it can be added to another.
   // A machine that can create devboxes always offers a second one to run on.
   const hasMultipleEnvironments =
-    (availableEnvironments?.length ?? 0) > 1 || addTargets.length > 0 || onNewDevbox !== undefined;
+    (availableEnvironments?.length ?? 0) > 1 ||
+    addTargets.length > 0 ||
+    onNewDevbox !== undefined ||
+    awaitingNewDevbox;
   const showEnvironmentPicker = hasMultipleEnvironments && onEnvironmentChange !== undefined;
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
@@ -795,7 +802,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (!activeProject) return null;
 
   const startsNewWorktree =
-    showGitControls && effectiveEnvMode === "worktree" && activeWorktreePath === null;
+    effectiveShowGitControls && effectiveEnvMode === "worktree" && activeWorktreePath === null;
   const offersRepositoryChoice =
     startsNewWorktree &&
     !isServerThread &&
@@ -810,7 +817,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             displayMode="panel"
             workspaceRoot={activeProject.workspaceRoot}
             forceNewWorktree={forceNewWorktree}
-            offersWorkspaceModes={showGitControls}
+            offersWorkspaceModes={effectiveShowGitControls}
             autoEnvironmentLabel={autoEnvironmentLabel}
             onAutoEnvironment={onAutoEnvironment}
             envLocked={envLocked}
@@ -831,7 +838,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             onNewDevbox={onNewDevbox}
           />
         ) : null}
-        {panelSection !== "workspace" ? (
+        {panelSection !== "workspace" && effectiveShowBranchControls ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
             className="w-full"
@@ -858,11 +865,11 @@ export const BranchToolbar = memo(function BranchToolbar({
       data-compact={labelsOverflow ? "" : undefined}
       className={cn("gap-1 text-xs font-normal text-foreground/70 dark:text-muted-foreground")}
     >
-      {showGitControls ? (
+      {effectiveShowGitControls ? (
         <div className="contents @xl/composer-surface:hidden">
           <RunContextSelector
             forceNewWorktree={forceNewWorktree}
-            offersWorkspaceModes={showGitControls}
+            offersWorkspaceModes={effectiveShowGitControls}
             autoEnvironmentLabel={autoEnvironmentLabel}
             onAutoEnvironment={onAutoEnvironment}
             envLocked={envLocked}
@@ -884,11 +891,11 @@ export const BranchToolbar = memo(function BranchToolbar({
           />
         </div>
       ) : null}
-      {showGitControls || showEnvironmentIndicator ? (
+      {effectiveShowGitControls || showEnvironmentIndicator ? (
         <div
           className={cn(
             "min-h-7 min-w-10 items-center gap-1 sm:min-h-6",
-            showGitControls ? "hidden @xl/composer-surface:flex" : "flex",
+            effectiveShowGitControls ? "hidden @xl/composer-surface:flex" : "flex",
             "flex-1",
           )}
         >
@@ -904,7 +911,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 {...(addTargets.length > 0 ? { onAddToMachine: () => onAddToMachine(null) } : {})}
                 onNewDevbox={onNewDevbox}
               />
-              {showGitControls ? (
+              {effectiveShowGitControls ? (
                 <Separator
                   orientation="vertical"
                   className="mx-0.5 h-3.5!"
@@ -913,7 +920,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               ) : null}
             </>
           )}
-          {showGitControls ? (
+          {effectiveShowGitControls ? (
             <BranchToolbarEnvModeSelector
               forceNewWorktree={forceNewWorktree}
               envLocked={envModeLocked}
@@ -932,10 +939,10 @@ export const BranchToolbar = memo(function BranchToolbar({
         <WorktreeRepositoriesControl
           project={activeProject}
           draftTarget={draftId ?? threadRef}
-          offersBaseBranch={!showBranchControls}
+          offersBaseBranch={!effectiveShowBranchControls}
         />
       ) : null}
-      {!showGitControls ? null : !showBranchControls ? (
+      {!effectiveShowGitControls ? null : !effectiveShowBranchControls ? (
         startsNewWorktree ? (
           <span
             className="min-w-0 flex-initial truncate px-1.75 @xl/composer-surface:ml-auto"

@@ -2,7 +2,7 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { AtomRegistry } from "effect/reactivity";
 import { expect, it } from "vite-plus/test";
 
-import { createDevboxClaims } from "./devboxClaims";
+import { createDevboxClaims, isDraftAwaitingNewDevbox } from "./devboxClaims";
 
 it("keeps claims and startup completion on the draft that requested them", async () => {
   const registry = AtomRegistry.make();
@@ -31,4 +31,32 @@ it("keeps claims and startup completion on the draft that requested them", async
     kind: "failed",
     error: "Sign-in required",
   });
+});
+
+it("identifies drafts awaiting a new devbox until they switch to its environment", () => {
+  const local = EnvironmentId.make("local");
+  const devbox = EnvironmentId.make("devbox");
+  expect(isDraftAwaitingNewDevbox({ kind: "idle" }, local)).toBe(false);
+  expect(isDraftAwaitingNewDevbox({ kind: "preparing", submitted: false }, local)).toBe(true);
+  expect(isDraftAwaitingNewDevbox({ kind: "failed", error: "Could not prepare" }, local)).toBe(
+    true,
+  );
+  expect(
+    isDraftAwaitingNewDevbox(
+      { kind: "ready", environmentId: devbox, name: "box", submitted: false },
+      local,
+    ),
+  ).toBe(true);
+  expect(
+    isDraftAwaitingNewDevbox(
+      { kind: "ready", environmentId: devbox, name: "box", submitted: false },
+      devbox,
+    ),
+  ).toBe(false);
+  expect(
+    isDraftAwaitingNewDevbox(
+      { kind: "switched", environmentId: devbox, name: "box", submitted: false },
+      devbox,
+    ),
+  ).toBe(false);
 });

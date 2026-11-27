@@ -731,12 +731,17 @@ export default function ChatView(props: ChatViewProps) {
   const devboxSendWait =
     useAtomValue(devboxSendWaitsAtom).get(devboxSendKey(environmentId, threadId)) ?? null;
   // A send waiting on its devbox outlives this view, which may have been left and reopened.
+  // Keep the message check separate so React Compiler caches the merged array on stable inputs.
+  const waitingDevboxMessage =
+    devboxSendWait !== null &&
+    !serverAcknowledgedUserMessageIds.has(devboxSendWait.message.id) &&
+    !optimisticState.messages.some((message) => message.id === devboxSendWait.message.id)
+      ? devboxSendWait.message
+      : null;
   const optimisticUserMessages =
-    devboxSendWait === null ||
-    serverAcknowledgedUserMessageIds.has(devboxSendWait.message.id) ||
-    optimisticState.messages.some((message) => message.id === devboxSendWait.message.id)
+    waitingDevboxMessage === null
       ? optimisticState.messages
-      : [...optimisticState.messages, devboxSendWait.message];
+      : [...optimisticState.messages, waitingDevboxMessage];
   const setOptimisticUserMessages = (action: SetStateAction<ChatMessage[]>) =>
     setHeldOptimisticUserMessages((state) =>
       applyOptimisticUserMessagesAction(state, threadId, action),
