@@ -824,12 +824,14 @@ export const make = Effect.gen(function* () {
   const installPersonalization = Effect.fn("DevboxService.installPersonalization")(function* (
     name: string,
   ) {
-    const { council, dig, digPolicy } = yield* Effect.all({
+    const { cleantest, council, dig, digPolicy } = yield* Effect.all({
+      cleantest: readPersonalFile(".agents/skills/cleantest/SKILL.md"),
       council: readPersonalFile(".agents/skills/council/SKILL.md"),
       dig: readPersonalFile(".agents/skills/dig/SKILL.md"),
       digPolicy: readPersonalFile(".agents/skills/dig/agents/openai.yaml"),
     });
     const skills = {
+      ...(cleantest?.trim() ? { cleantest: { "SKILL.md": cleantest } } : {}),
       ...(council?.trim() ? { council: { "SKILL.md": council } } : {}),
       ...(dig?.trim() && digPolicy?.trim()
         ? { dig: { "agents/openai.yaml": digPolicy, "SKILL.md": dig } }

@@ -189,6 +189,10 @@ describe("devbox personal instructions", () => {
     NodeFS.writeFileSync(NodePath.join(home, ".codex", "auth.json"), "untouched credentials");
     const payload = {
       skills: {
+        cleantest: {
+          "SKILL.md":
+            "---\nname: cleantest\ndescription: Deduplicate and reduce tests.\n---\nCleanTest workflow\n",
+        },
         council: {
           "SKILL.md":
             "---\nname: council\ndescription: Review with the council.\n---\nCouncil workflow\n",
