@@ -31,6 +31,8 @@ interface ContextTier {
 export interface ModelRate extends SpeedRates {
   /** Sorted by descending threshold. */
   readonly contextTiers: readonly ContextTier[];
+  /** Vertex AI regional endpoint multiplier (e.g. 1.1 for `eu` vs `global`), when published. */
+  readonly regionalUpliftMultiplier?: number;
 }
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
@@ -177,9 +179,13 @@ export function parseRateTable(document: unknown): RateTable {
 
     const key = normalizeRateKey(name);
     if (key.length === 0) continue;
+    const regionalUplift = finiteNumber(entry["regional_endpoint_uplift_multiplier"]);
     table.set(key, {
       ...readSpeedRates(entry, standard),
       contextTiers: readContextTiers(entry, standard),
+      ...(regionalUplift !== null && regionalUplift > 1
+        ? { regionalUpliftMultiplier: regionalUplift }
+        : {}),
     });
   }
 
@@ -248,7 +254,13 @@ function mergeContextTiers(
 function mergeAliasRate(a: ModelRate, b: ModelRate): ModelRate | null {
   const speeds = mergeSpeedRates(a, b);
   const contextTiers = mergeContextTiers(a.contextTiers, b.contextTiers);
-  return speeds === null || contextTiers === null ? null : { ...speeds, contextTiers };
+  if (speeds === null || contextTiers === null) return null;
+  const regionalUpliftMultiplier = a.regionalUpliftMultiplier ?? b.regionalUpliftMultiplier;
+  return {
+    ...speeds,
+    contextTiers,
+    ...(regionalUpliftMultiplier === undefined ? {} : { regionalUpliftMultiplier }),
+  };
 }
 
 function promptTokens(totals: UsageTokenTotals): number {
@@ -338,6 +350,7 @@ export type PricedRecord = Pick<
   | "totals"
   | "cacheCreation1hTokens"
   | "speed"
+  | "regionalEndpoint"
   | "modelCalls"
   | "reportedCostUsd"
 >;
@@ -345,6 +358,25 @@ export type PricedRecord = Pick<
 function recordRate(table: RateTable, record: PricedRecord): ModelRate | null {
   const rate = record.rateModel === undefined ? null : lookupRate(table, record.rateModel);
   return rate ?? lookupRate(table, record.model);
+}
+
+function regionalUpliftFor(table: RateTable, record: PricedRecord, rate: ModelRate): number | null {
+  if (record.regionalEndpoint !== true) return null;
+  if (rate.regionalUpliftMultiplier !== undefined && rate.regionalUpliftMultiplier > 1) {
+    return rate.regionalUpliftMultiplier;
+  }
+  const bare = bareModelName(
+    stripVariantSuffix(normalizeRateKey(record.rateModel ?? record.model)),
+  );
+  if (bare.length === 0) return null;
+  const vertex = lookupRate(table, `vertex_ai/${bare}`);
+  return vertex?.regionalUpliftMultiplier !== undefined && vertex.regionalUpliftMultiplier > 1
+    ? vertex.regionalUpliftMultiplier
+    : null;
+}
+
+function applyRegionalUplift(rates: TokenRates, uplift: number | null): TokenRates {
+  return uplift === null ? rates : scaleTokenRates(rates, uplift);
 }
 
 export interface PricedUsage {
@@ -394,14 +426,23 @@ export function priceUsage(
     return reported === null ? unsplit(0, "unpriced") : unsplit(reported, "providerReported");
   }
 
-  const listCost = costByCategory(record, ratesAt(rate, record.speed, totals, record.modelCalls));
+  const uplift = override === undefined ? regionalUpliftFor(table, record, rate) : null;
+  const listCost = costByCategory(
+    record,
+    applyRegionalUplift(ratesAt(rate, record.speed, totals, record.modelCalls), uplift),
+  );
   const listCostUsd = sumCategories(listCost);
   if (reported !== null && listCostUsd <= 0) return unsplit(reported, "providerReported");
   const premiumUsd =
     record.speed === "standard"
       ? 0
       : listCostUsd -
-        sumCategories(costByCategory(record, ratesAt(rate, "standard", totals, record.modelCalls)));
+        sumCategories(
+          costByCategory(
+            record,
+            applyRegionalUplift(ratesAt(rate, "standard", totals, record.modelCalls), uplift),
+          ),
+        );
   const scale = reported === null ? 1 : reported / listCostUsd;
   return {
     costUsd: reported ?? listCostUsd,
@@ -421,8 +462,13 @@ export function cacheSavingsUsd(
   record: PricedRecord,
   overrides?: RateTable,
 ): number {
-  const rate = overrides?.get(record.model.trim()) ?? recordRate(table, record);
+  const override = overrides?.get(record.model.trim());
+  const rate = override ?? recordRate(table, record);
   if (rate === null) return 0;
-  const rates = ratesAt(rate, record.speed, record.totals, record.modelCalls);
+  const uplift = override === undefined ? regionalUpliftFor(table, record, rate) : null;
+  const rates = applyRegionalUplift(
+    ratesAt(rate, record.speed, record.totals, record.modelCalls),
+    uplift,
+  );
   return record.totals.cachedInputTokens * (rates.inputCostPerToken - rates.cacheReadCostPerToken);
 }

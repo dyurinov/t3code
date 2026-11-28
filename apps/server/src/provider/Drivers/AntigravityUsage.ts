@@ -86,10 +86,21 @@ const make = Effect.gen(function* () {
   }) {
     // No allowed instance means nothing to count, not even T3's own Antigravity profiles.
     if (instances.length === 0) return [];
-    const roots: Array<string> = [];
-    for (const instance of instances) roots.push(...(yield* dataRoots(instance.environment)));
-    for (const { instanceId } of instances) {
-      roots.push(path.join(yield* profileDirectory(instanceId), "antigravity-acp"));
+    const isRegionalVertex = (config: AntigravitySettings | undefined) => {
+      if (config?.authMethod !== "agent-platform") return false;
+      const location = config.gcpLocation?.trim().toLowerCase();
+      return Boolean(location) && location !== "global";
+    };
+    const roots: Array<{ readonly root: string; readonly regionalEndpoint: boolean }> = [];
+    for (const instance of instances) {
+      const regionalEndpoint = isRegionalVertex(instance.config);
+      for (const root of yield* dataRoots(instance.environment)) {
+        roots.push({ root, regionalEndpoint });
+      }
+      roots.push({
+        root: path.join(yield* profileDirectory(instance.instanceId), "antigravity-acp"),
+        regionalEndpoint,
+      });
     }
     const unreadProfiles = new Set<string>();
     for (const instanceId of unreadInstanceIds)
@@ -101,10 +112,12 @@ const make = Effect.gen(function* () {
       .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
     for (const profile of profiles) {
       const profileDir = path.join(profilesDir, profile);
-      if (!unreadProfiles.has(profileDir)) roots.push(path.join(profileDir, "antigravity-acp"));
+      if (!unreadProfiles.has(profileDir)) {
+        roots.push({ root: path.join(profileDir, "antigravity-acp"), regionalEndpoint: false });
+      }
     }
-    const conversationDirs = new Set<string>();
-    for (const root of roots) {
+    const conversationDirs = new Map<string, boolean>();
+    for (const { root, regionalEndpoint } of roots) {
       const resolvedRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
       const nested = path.join(resolvedRoot, "conversations");
       const dir = (yield* fileSystem
@@ -112,14 +125,22 @@ const make = Effect.gen(function* () {
         .pipe(Effect.catchCause(() => Effect.succeed(false))))
         ? nested
         : resolvedRoot;
-      conversationDirs.add(yield* fileSystem.realPath(dir).pipe(Effect.orElseSucceed(() => dir)));
+      const canonical = yield* fileSystem.realPath(dir).pipe(Effect.orElseSucceed(() => dir));
+      conversationDirs.set(
+        canonical,
+        (conversationDirs.get(canonical) ?? false) || regionalEndpoint,
+      );
     }
-    const result = yield* readAntigravityUsage([...conversationDirs], windowStartMs, cache).pipe(
+    const result = yield* readAntigravityUsage(
+      [...conversationDirs.keys()],
+      windowStartMs,
+      cache,
+    ).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
     const scanned: ProviderUsageScan[] = [];
-    for (const dir of conversationDirs) {
+    for (const [dir, regionalEndpoint] of conversationDirs) {
       const exists = yield* fileSystem
         .exists(dir)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
@@ -128,7 +149,22 @@ const make = Effect.gen(function* () {
       );
       scanned.push({
         dir,
-        files: !exists && !failed ? null : result.files.filter((file) => file.root === dir),
+        files:
+          !exists && !failed
+            ? null
+            : result.files
+                .filter((file) => file.root === dir)
+                .map((file) =>
+                  regionalEndpoint
+                    ? {
+                        ...file,
+                        records: file.records.map((record) => ({
+                          ...record,
+                          regionalEndpoint: true,
+                        })),
+                      }
+                    : file,
+                ),
         status: failed ? "partial" : "ok",
         ...(failed ? { message: "Some Antigravity history could not be read." } : {}),
       });

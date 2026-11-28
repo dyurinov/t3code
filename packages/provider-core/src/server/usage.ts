@@ -22,6 +22,8 @@ export interface UsageRecord {
   readonly cacheCreation1hTokens?: number;
   readonly reportedCostUsd: number | null;
   readonly speed: UsageSpeed;
+  /** True when billed through a regional Vertex AI endpoint (applies LiteLLM regional uplift). */
+  readonly regionalEndpoint?: boolean;
   /** Number of underlying model requests summed into a turn summary when > 1. */
   readonly modelCalls?: number;
   readonly unresolvedServiceTierTurnId?: string;

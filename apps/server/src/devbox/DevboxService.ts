@@ -12,6 +12,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceEnvironmentVariableName,
   ProviderInstanceId,
+  UsageDay,
   type DeletedDevbox,
   type DevboxClientPairing,
   type DevboxCreateInput,
@@ -68,10 +69,12 @@ import * as ProviderCredentialStore from "../provider/ProviderCredentialStore.ts
 import { forkParked } from "../serverActivation.ts";
 import * as DevboxLogins from "./DevboxLogins.ts";
 import * as DevboxThreadMigration from "./DevboxThreadMigration.ts";
+import * as DevboxUsageArchive from "./DevboxUsageArchive.ts";
 import * as DevboxVertexMetadata from "./DevboxVertexMetadata.ts";
 import { environmentRpc } from "./devboxRpc.ts";
 import {
   ACTIVE_RUN_SCRIPT,
+  EXPORT_DEVBOX_USAGE_SCRIPT,
   FENCE_T3_SCRIPT,
   INSTALL_CREDENTIALS_SCRIPT,
   INSTALL_PERSONALIZATION_SCRIPT,
@@ -87,6 +90,7 @@ import {
   SETTINGS_TOKEN_SCRIPT,
   SIBLING_REMOVE_SCRIPT,
   SIBLING_SCRIPT,
+  USAGE_TOKEN_SCRIPT,
   parseCoderList,
   isCurrentProvisionRevision,
   parsePairingToken,
@@ -240,6 +244,14 @@ const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const CURSOR_API_KEY_ENV_NAME = ProviderInstanceEnvironmentVariableName.make("CURSOR_API_KEY");
 const ANTIGRAVITY_INSTANCE_ID = ProviderInstanceId.make("antigravity");
 const ANTIGRAVITY_DRIVER_KIND = ProviderDriverKind.make("antigravity");
+const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
+const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
+const USAGE_ACCESS_SYNC_DRIVERS = [
+  CODEX_DRIVER_KIND,
+  CLAUDE_DRIVER_KIND,
+  CURSOR_DRIVER_KIND,
+  ANTIGRAVITY_DRIVER_KIND,
+] as const;
 const VERTEX_METADATA_ENV_NAME = ProviderInstanceEnvironmentVariableName.make("GCE_METADATA_HOST");
 const VERTEX_OWNER_ENV_NAME =
   ProviderInstanceEnvironmentVariableName.make("T3_DEVBOX_VERTEX_OWNER");
@@ -306,6 +318,7 @@ export const make = Effect.gen(function* () {
   // The access tokens each box last got, so the sync only writes to boxes that are behind.
   const pushed = new Map<string, string>();
   const pushedCursorKeys = new Map<string, string>();
+  const pushedUsageAccess = new Map<string, string>();
   const pushedAntigravity = new Map<
     string,
     { readonly key: string; readonly outcome: "enabled" | "declined" }
@@ -1259,11 +1272,26 @@ export const make = Effect.gen(function* () {
     const key = (configured ?? inheritedCursorApiKey)?.trim();
     return key || Option.getOrUndefined(yield* browserCursorApiKey);
   });
+  const hostAllowedUsageDrivers = (snapshot: ServerSettings): ReadonlyArray<ProviderDriverKind> => {
+    const allowed = new Set<ProviderDriverKind>();
+    for (const instance of Object.values(snapshot.providerInstances)) {
+      if (instance.enabled !== false && instance.usageAccess === "allowed") {
+        allowed.add(instance.driver);
+      }
+    }
+    return USAGE_ACCESS_SYNC_DRIVERS.filter((driver) => allowed.has(driver));
+  };
+  const usageAccessSettingKey = (snapshot: ServerSettings) =>
+    hostAllowedUsageDrivers(snapshot).join(",");
+
   const installCursor = Effect.fn("DevboxService.installCursor")(
     function* (record: DevboxRecord) {
       // Read under the box lock so a delayed push cannot overwrite a newer key.
       const key = yield* readCursorApiKey();
       if (!key || pushedCursorKeys.get(record.name) === key) return;
+      const allowCursorUsage = hostAllowedUsageDrivers(yield* settings.getSettings).includes(
+        CURSOR_DRIVER_KIND,
+      );
       pushedCursorKeys.delete(record.name);
       const token = lastLine(yield* ssh(record.name, "sh -s", SETTINGS_TOKEN_SCRIPT));
       if (!token) {
@@ -1281,6 +1309,8 @@ export const make = Effect.gen(function* () {
           const remainingEnv = (current?.environment ?? []).filter(
             (entry) => entry.name !== CURSOR_API_KEY_ENV_NAME,
           );
+          const nextUsageAccess =
+            current?.usageAccess ?? (allowCursorUsage ? ("allowed" as const) : undefined);
           yield* rpc[WS_METHODS.serverUpdateSettings]({
             patch: {},
             providerInstanceMutation: {
@@ -1291,6 +1321,7 @@ export const make = Effect.gen(function* () {
                 driver: CURSOR_DRIVER_KIND,
                 displayName: current?.displayName ?? "Cursor",
                 enabled: true,
+                ...(nextUsageAccess === undefined ? {} : { usageAccess: nextUsageAccess }),
                 environment: [
                   ...remainingEnv,
                   {
@@ -1313,6 +1344,150 @@ export const make = Effect.gen(function* () {
             name: record.name,
             error,
           }),
+        ),
+      ),
+  );
+
+  // Propagates this machine's usageAccess: "allowed" grants to devboxes so Usage counts running
+  // boxes automatically, while never overriding an explicit "denied" on a box.
+  const syncUsageAccessBox = Effect.fn("DevboxService.syncUsageAccessBox")(
+    function* (record: DevboxRecord) {
+      const allowed = hostAllowedUsageDrivers(yield* settings.getSettings);
+      const key = allowed.join(",");
+      if (allowed.length === 0 || pushedUsageAccess.get(record.name) === key) return;
+      pushedUsageAccess.delete(record.name);
+      const token = lastLine(yield* ssh(record.name, "sh -s", SETTINGS_TOKEN_SCRIPT));
+      if (!token) return;
+      yield* boxRpc(record, token, (rpc) =>
+        Effect.gen(function* () {
+          const boxSettings = yield* rpc[WS_METHODS.serverGetSettings]({});
+          for (const driver of allowed) {
+            const instanceId = ProviderInstanceId.make(driver);
+            const current = boxSettings.providerInstances[instanceId];
+            if (current?.usageAccess !== undefined) continue;
+            const optionalProvider =
+              driver === CURSOR_DRIVER_KIND || driver === ANTIGRAVITY_DRIVER_KIND;
+            if (optionalProvider && (current === undefined || current.enabled === false)) continue;
+            yield* rpc[WS_METHODS.serverUpdateSettings]({
+              patch: {},
+              providerInstanceMutation: {
+                operation: current === undefined ? "create" : "upsert",
+                instanceId,
+                instance: {
+                  ...current,
+                  driver,
+                  enabled: current?.enabled ?? true,
+                  usageAccess: "allowed",
+                },
+              },
+            });
+          }
+        }),
+      );
+      pushedUsageAccess.set(record.name, key);
+    },
+    (effect, record) =>
+      effect.pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("devbox usage access could not be synced", {
+            name: record.name,
+            error,
+          }),
+        ),
+      ),
+  );
+  const syncUsageAccess = Effect.fn("DevboxService.syncUsageAccess")(
+    function* (all: ReadonlyMap<string, CoderWorkspace> | undefined) {
+      const allowed = hostAllowedUsageDrivers(yield* settings.getSettings);
+      if (allowed.length === 0) return;
+      const key = allowed.join(",");
+      const inventory = all ?? (yield* workspaces);
+      const held = new Set(yield* locks.activeKeys);
+      const running = [...(yield* Ref.get(records)).values()].filter(
+        (record) =>
+          record.environmentId !== null &&
+          inventory.get(record.name)?.latest_build.status === "running" &&
+          pushedUsageAccess.get(record.name) !== key &&
+          !held.has(record.name),
+      );
+      yield* Effect.forEach(
+        running,
+        (record) =>
+          locks.withLock(
+            record.name,
+            Effect.gen(function* () {
+              const latest = (yield* Ref.get(records)).get(record.name);
+              const state = (yield* Ref.get(transient)).get(record.name)?.state;
+              if (
+                latest !== undefined &&
+                latest.environmentId !== null &&
+                state !== "stopping" &&
+                state !== "deleting"
+              ) {
+                yield* syncUsageAccessBox(latest);
+              }
+            }),
+          ),
+        { concurrency: 4, discard: true },
+      );
+    },
+    (effect, _all) =>
+      effect.pipe(Effect.catch(() => Effect.logWarning("devbox usage access sync failed"))),
+  );
+
+  // Archives a box's local usage records onto this machine so stopped and deleted boxes stay
+  // counted in Usage without double-counting when the box is running.
+  const triggerBoxUsageRefresh = Effect.fn("DevboxService.triggerBoxUsageRefresh")(
+    function* (record: DevboxRecord) {
+      if (record.environmentId === null) return;
+      const token = lastLine(yield* ssh(record.name, "sh -s", USAGE_TOKEN_SCRIPT));
+      if (!token) return;
+      const nowMs = yield* Clock.currentTimeMillis;
+      const untilDay = DateTime.formatIsoDateUtc(DateTime.makeUnsafe(nowMs));
+      const sinceDay = DateTime.formatIsoDateUtc(
+        DateTime.makeUnsafe(nowMs - 90 * 24 * 60 * 60 * 1000),
+      );
+      yield* boxRpc(record, token, (rpc) =>
+        rpc[WS_METHODS.serverGetUsageSummary]({
+          sinceDay: UsageDay.make(sinceDay),
+          untilDay: UsageDay.make(untilDay),
+          timeZone: "UTC",
+          awaitRefresh: true,
+        }),
+      );
+      // Give the box server's detached scan-cache persist fiber a moment to flush to disk.
+      yield* Effect.sleep("300 millis");
+    },
+    (effect) => effect.pipe(Effect.ignore),
+  );
+
+  const snapshotBoxUsage = Effect.fn("DevboxService.snapshotBoxUsage")(
+    function* (record: DevboxRecord, options?: { readonly triggerSummary?: boolean }) {
+      if (options?.triggerSummary !== false && (yield* FiberMap.has(tunnels, record.name))) {
+        yield* triggerBoxUsageRefresh(record);
+      }
+      const gzippedBytes = yield* sshBinary(
+        record.name,
+        `python3 -c ${shellQuote(EXPORT_DEVBOX_USAGE_SCRIPT)}`,
+        { timeout: "2 minutes" },
+      );
+      if (gzippedBytes.byteLength === 0) return;
+      const nowMs = yield* Clock.currentTimeMillis;
+      yield* DevboxUsageArchive.saveDevboxUsageArchive({
+        stateDir: config.stateDir,
+        boxName: record.name,
+        environmentId: record.environmentId,
+        gzippedBytes,
+        capturedAtMs: nowMs,
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+      );
+    },
+    (effect, record, _options?) =>
+      effect.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("devbox usage snapshot failed", { name: record.name, cause }),
         ),
       ),
   );
@@ -1602,6 +1777,9 @@ export const make = Effect.gen(function* () {
             message: "The box did not return a settings token.",
           });
         }
+        const allowAntigravityUsage = hostAllowedUsageDrivers(yield* settings.getSettings).includes(
+          ANTIGRAVITY_DRIVER_KIND,
+        );
         const outcome = yield* boxRpc(record, applyToken, (rpc) =>
           Effect.gen(function* () {
             const boxSettings = yield* rpc[WS_METHODS.serverGetSettings]({});
@@ -1616,10 +1794,13 @@ export const make = Effect.gen(function* () {
               !Array.isArray(current.config)
                 ? { ...(current.config as Record<string, unknown>) }
                 : {};
+            const nextUsageAccess =
+              current?.usageAccess ?? (allowAntigravityUsage ? ("allowed" as const) : undefined);
             if (
               owner === hostOwnerId &&
               hasMetadataHostEnv(current) &&
               current?.enabled === true &&
+              current?.usageAccess === nextUsageAccess &&
               existingConfig.authMethod === "agent-platform" &&
               existingConfig.gcpProject === syncState.gcpProject &&
               existingConfig.gcpLocation === syncState.gcpLocation &&
@@ -1660,6 +1841,7 @@ export const make = Effect.gen(function* () {
                   driver: ANTIGRAVITY_DRIVER_KIND,
                   displayName: current?.displayName ?? "Antigravity",
                   enabled: true,
+                  ...(nextUsageAccess === undefined ? {} : { usageAccess: nextUsageAccess }),
                   config: {
                     ...existingConfig,
                     authMethod: "agent-platform",
@@ -1773,6 +1955,7 @@ export const make = Effect.gen(function* () {
         );
         if (reached) {
           yield* installCursor(record);
+          yield* syncUsageAccessBox(record);
           return yield* link(record);
         }
       }
@@ -1789,6 +1972,7 @@ export const make = Effect.gen(function* () {
       }));
       yield* startTunnel(provisioned);
       yield* installCursor(provisioned);
+      yield* syncUsageAccessBox(provisioned);
       return yield* link(provisioned);
     },
     (effect, stored) =>
@@ -1822,6 +2006,7 @@ export const make = Effect.gen(function* () {
             pushedAntigravity.delete(record.name);
           }).pipe(Effect.andThen(scheduleAntigravitySync(record, false))),
         ),
+        Effect.tap((record) => FiberSet.run(background, snapshotBoxUsage(record))),
         Effect.tapError((error) =>
           FiberMap.remove(tunnels, stored.name).pipe(
             Effect.andThen(
@@ -2026,7 +2211,7 @@ export const make = Effect.gen(function* () {
 
   // Stopping takes about a minute; callers follow the box's state instead of waiting.
   const stop: DevboxService["Service"]["stop"] = Effect.fn("DevboxService.stop")(function* (name) {
-    yield* getRecord(name);
+    const record = yield* getRecord(name);
     if ((yield* Ref.get(transient)).get(name)?.state === "deleting") {
       return yield* new DevboxError({
         reason: "busy",
@@ -2040,7 +2225,8 @@ export const make = Effect.gen(function* () {
       locks
         .withLock(
           name,
-          FiberMap.remove(tunnels, name).pipe(
+          snapshotBoxUsage(record).pipe(
+            Effect.andThen(FiberMap.remove(tunnels, name)),
             Effect.andThen(FiberMap.remove(antigravitySyncs, name)),
             Effect.andThen(FiberMap.remove(vertexTunnels, name)),
             Effect.andThen(coder(["stop", name, "--yes"], "10 minutes")),
@@ -2289,12 +2475,15 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
                       yield* startWorkspace(name);
                     }
                     yield* coder(["ssh", "--wait=no", name, "--", "true"], "5 minutes");
+                    if (status === "running" && (yield* FiberMap.has(tunnels, name))) {
+                      yield* triggerBoxUsageRefresh(record);
+                    }
                     // Mark before fencing so an interrupt/timeout mid-stop still restarts t3code.service.
                     // The remote ownership lock stays held in this scope through coder delete.
                     stoppedServiceForMigration = true;
                     const fence = yield* acquireRemoteT3Fence(name, !options.force);
                     activeFenceLost = fence.lost;
-                    return yield* Effect.raceFirst(
+                    const migrated = yield* Effect.raceFirst(
                       threadMigration.migrateFromDevbox({
                         name,
                         expectDatabase: record.environmentId !== null,
@@ -2303,6 +2492,8 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
                       }),
                       Deferred.await(fence.lost).pipe(Effect.flatMap(Effect.fail)),
                     );
+                    yield* snapshotBoxUsage(record, { triggerSummary: false });
+                    return migrated;
                   });
                   const migrationResult = yield* migrateEffect.pipe(
                     Effect.map((result) => ({ ok: true as const, result })),
@@ -2848,6 +3039,7 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
       const busy = yield* hasActiveRun(record.name).pipe(Effect.orElseSucceed(() => false));
       if (busy)
         yield* coder(["schedule", "extend", record.name, KEEP_ALIVE_EXTENSION]).pipe(Effect.ignore);
+      yield* FiberSet.run(background, snapshotBoxUsage(record));
     }
   }).pipe(
     Effect.catchCause((cause) => Effect.logWarning("devbox keep-awake failed", { cause })),
@@ -2867,6 +3059,7 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
     yield* FiberSet.run(background, unlinkSiblings(record).pipe(Effect.ignore));
     pushed.delete(name);
     pushedCursorKeys.delete(name);
+    pushedUsageAccess.delete(name);
     pushedAntigravity.delete(name);
     persistedAntigravityManaged.delete(name);
     unboundBoxes.delete(name);
@@ -2916,6 +3109,7 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
     const all = yield* workspaces;
     yield* reconcileWithCoder(all);
     yield* syncCursor(all);
+    yield* syncUsageAccess(all);
     yield* syncAntigravity(all, true);
     const held = new Set(yield* locks.activeKeys);
     const currentTransient = yield* Ref.get(transient);
@@ -2958,13 +3152,18 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
   const initialSettings = yield* settings.getSettings;
   let lastCursorSetting = cursorSetting(initialSettings);
   let lastAntigravitySetting = antigravitySettingKey(initialSettings);
+  let lastUsageAccessSetting = usageAccessSettingKey(initialSettings);
   yield* settingsChanges.pipe(
     Stream.map((snapshot) => ({
       cursor: cursorSetting(snapshot),
       antigravity: antigravitySettingKey(snapshot),
+      usageAccess: usageAccessSettingKey(snapshot),
     })),
-    Stream.changesWith((a, b) => a.cursor === b.cursor && a.antigravity === b.antigravity),
-    Stream.runForEach(({ cursor, antigravity }) =>
+    Stream.changesWith(
+      (a, b) =>
+        a.cursor === b.cursor && a.antigravity === b.antigravity && a.usageAccess === b.usageAccess,
+    ),
+    Stream.runForEach(({ cursor, antigravity, usageAccess }) =>
       Effect.gen(function* () {
         if (cursor !== lastCursorSetting) {
           lastCursorSetting = cursor;
@@ -2973,6 +3172,10 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
         if (antigravity !== lastAntigravitySetting) {
           lastAntigravitySetting = antigravity;
           yield* syncAntigravity(undefined, false);
+        }
+        if (usageAccess !== lastUsageAccessSetting) {
+          lastUsageAccessSetting = usageAccess;
+          yield* syncUsageAccess(undefined);
         }
       }).pipe(
         Effect.catchCauseIf(

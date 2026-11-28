@@ -33,6 +33,7 @@ import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { formatMalformedUsageWarning } from "@t3tools/shared/usageFormat";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { readDevboxUsageArchives } from "../devbox/DevboxUsageArchive.ts";
 import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from "../provider/builtInDrivers.ts";
 import type { ProviderDriver } from "@t3tools/provider-core/server/driver";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -859,11 +860,33 @@ export const make = Effect.gen(function* () {
     );
 
     // Scan independent sources together, directories sequentially to bound open files; keep order, since the first copy decides a duplicate's bucket.
-    const [transcripts, scanDirs] = yield* Effect.all(
-      [Effect.forEach(dirs, (dir) => scanTranscriptDir(dir, windowStartMs, fromMemory)), scans],
+    const allowedProviders = new Set<UsageProviderKind>();
+    for (const driver of BUILT_IN_USAGE_DRIVERS) {
+      if (driver.usage === undefined) continue;
+      if ((yield* usageInstances(driver, settings)).length > 0) {
+        allowedProviders.add(driver.usage.provider);
+      }
+    }
+    const [transcripts, scanDirs, devboxArchives] = yield* Effect.all(
+      [
+        Effect.forEach(dirs, (dir) => scanTranscriptDir(dir, windowStartMs, fromMemory)),
+        scans,
+        readDevboxUsageArchives({
+          stateDir: config.stateDir,
+          allowedProviders,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ),
+      ],
       { concurrency: "unbounded" },
     );
-    const scanned: readonly ScannedDir[] = [...transcripts, ...pending, ...scanDirs.flat()];
+    const scanned: readonly ScannedDir[] = [
+      ...transcripts,
+      ...pending,
+      ...scanDirs.flat(),
+      ...devboxArchives,
+    ];
     return scanned;
   });
 

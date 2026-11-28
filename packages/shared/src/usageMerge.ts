@@ -118,9 +118,17 @@ function fingerprintKey(fingerprint: UsageSourceFingerprint): string {
   ].join(" ");
 }
 
-// Sources are one directory when either their legacy key or their physicalSourceId matches.
+const DEVBOX_ARCHIVE_PATH_PATTERN = /^devbox:\/\/[^/]+(\/.*)$/;
+
+function archivedRemotePath(resolvedHomePath: string): string | null {
+  const match = DEVBOX_ARCHIVE_PATH_PATTERN.exec(resolvedHomePath);
+  return match?.[1] ?? null;
+}
+
+// Sources are one directory when either their legacy key, physicalSourceId, or devbox archive matches.
 // physicalSourceId joins a directory read natively by Windows and through a WSL mount (path
-// and dev:ino both differ); the legacy key still joins installs whose host scopes differ.
+// and dev:ino both differ); archived devbox sources (`devbox://<name><remotePath>`) join the
+// live devbox's own fingerprint so running devboxes deduplicate cleanly against host archives.
 export function sourceIdentity(
   fingerprints: Iterable<UsageSourceFingerprint>,
 ): (fingerprint: UsageSourceFingerprint) => string {
@@ -133,6 +141,12 @@ export function sourceIdentity(
     return root;
   };
   for (const fingerprint of fingerprints) {
+    const remotePath = archivedRemotePath(fingerprint.resolvedHomePath);
+    if (remotePath !== null) {
+      const archived = find(fingerprintKey(fingerprint));
+      const live = find(fingerprintKey({ ...fingerprint, resolvedHomePath: remotePath }));
+      if (archived !== live) parent.set(archived, live);
+    }
     if (fingerprint.physicalSourceId === undefined) continue;
     const legacy = find(fingerprintKey(fingerprint));
     const physical = find(`\u0000${fingerprint.provider}\u0000${fingerprint.physicalSourceId}`);
@@ -181,17 +195,22 @@ function claimSources(
       a.environmentId.localeCompare(b.environmentId),
   );
 
-  for (const status of ["ok", "partial", "failed"] as const) {
-    for (const environment of ordered) {
-      for (const source of environment.summary.sources) {
-        if (source.status !== status) continue;
-        const key = sourceKey(source.fingerprint);
-        if (ownerScanByFingerprint.has(key)) {
-          duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
-          continue;
+  // Live scans always outrank host-archived devbox snapshots (`devbox://...`) for the same source.
+  for (const archivedPass of [false, true] as const) {
+    for (const status of ["ok", "partial", "failed"] as const) {
+      for (const environment of ordered) {
+        for (const source of environment.summary.sources) {
+          if (source.status !== status) continue;
+          const isArchived = archivedRemotePath(source.fingerprint.resolvedHomePath) !== null;
+          if (isArchived !== archivedPass) continue;
+          const key = sourceKey(source.fingerprint);
+          if (ownerScanByFingerprint.has(key)) {
+            duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
+            continue;
+          }
+          ownerScanByFingerprint.set(key, { environment, source });
+          sessionsByFingerprint.set(key, source.distinctSessions);
         }
-        ownerScanByFingerprint.set(key, { environment, source });
-        sessionsByFingerprint.set(key, source.distinctSessions);
       }
     }
   }

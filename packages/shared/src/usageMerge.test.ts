@@ -706,4 +706,66 @@ describe("mergeUsage", () => {
     expect(merged.sessions).toBe(1);
     expect(merged.providers[0]?.sessions).toBe(1);
   });
+
+  it("prefers live devboxes over newer host archives and keeps distinct stopped devboxes", () => {
+    const remotePath = "/home/vagrant/.claude/projects";
+    const liveBox = environment(
+      "box-1",
+      summary(
+        [bucket({ sourcePath: remotePath, costUsd: 15, records: 8 })],
+        [
+          {
+            provider: "claude",
+            hostId: "host-box-1",
+            homePath: remotePath,
+            volumeId: "vol-1",
+            distinctSessions: 3,
+          },
+        ],
+      ),
+    );
+    const archivedBox1Path = `devbox://01-running${remotePath}`;
+    const archivedBox2Path = `devbox://02-stopped${remotePath}`;
+    const hostWithArchives = environment("host", {
+      ...summary(
+        [
+          bucket({ sourcePath: archivedBox1Path, costUsd: 10, records: 5 }),
+          bucket({ sourcePath: archivedBox2Path, costUsd: 7, records: 4 }),
+        ],
+        [
+          {
+            provider: "claude",
+            hostId: "host-box-1",
+            homePath: archivedBox1Path,
+            volumeId: "vol-1",
+            distinctSessions: 2,
+          },
+          {
+            provider: "claude",
+            hostId: "host-box-2",
+            homePath: archivedBox2Path,
+            volumeId: "vol-2",
+            distinctSessions: 1,
+          },
+        ],
+      ),
+      readAt: "2026-08-08T00:00:00.000Z",
+    });
+
+    for (const ordered of [
+      [hostWithArchives, liveBox],
+      [liveBox, hostWithArchives],
+    ]) {
+      const merged = mergeUsage(ordered, USAGE_CONTRACT_VERSION);
+      expect(merged.costUsd).toBe(22);
+      expect(merged.records).toBe(12);
+      expect(merged.sessions).toBe(4);
+      expect(merged.duplicateSources).toEqual([`host: ${archivedBox1Path}`]);
+    }
+
+    const stoppedOnly = mergeUsage([hostWithArchives], USAGE_CONTRACT_VERSION);
+    expect(stoppedOnly.costUsd).toBe(17);
+    expect(stoppedOnly.records).toBe(9);
+    expect(stoppedOnly.sessions).toBe(3);
+  });
 });

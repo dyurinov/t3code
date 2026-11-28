@@ -290,6 +290,10 @@ export const SETTINGS_TOKEN_SCRIPT = String.raw`set -eu
 "$HOME/.t3/runtime/current/t3" auth session issue --base-dir "$HOME/.t3" --scope orchestration:read --scope providers:manage --ttl 5m --label "T3 devbox settings" --token-only
 `;
 
+export const USAGE_TOKEN_SCRIPT = String.raw`set -eu
+"$HOME/.t3/runtime/current/t3" auth session issue --base-dir "$HOME/.t3" --scope diagnostics:read --ttl 5m --label "T3 devbox usage" --token-only
+`;
+
 /**
  * Runs on a box as `sh -s -- <sibling> <port>`: the sibling's T3 server answers at
  * 127.0.0.1:<port>. The Coder tunnel starts on the first connection and stops after 15 idle
@@ -1306,3 +1310,359 @@ export function goneFromCoder(input: {
   }
   return { gone, misses };
 }
+
+/**
+ * Exports a devbox's local usage data (hostId, newest usage-scan-cache JSON for transcript
+ * providers, and parsed Antigravity conversation DB usage records) as gzipped JSON to stdout.
+ */
+export const EXPORT_DEVBOX_USAGE_SCRIPT = String.raw`import gzip, json, os, pathlib, re, socket, sqlite3, sys
+
+home = pathlib.Path.home()
+base_dir = home / ".t3"
+userdata_dir = base_dir / "userdata"
+
+host_id_path = base_dir / "usage-host-id"
+host_id = ""
+try:
+    host_id = host_id_path.read_text(encoding="utf-8").strip()
+except OSError:
+    pass
+if not host_id:
+    host_id = socket.gethostname()
+
+scan_cache = None
+if userdata_dir.is_dir():
+    cache_candidates = []
+    for entry in userdata_dir.iterdir():
+        m = re.fullmatch(r"usage-scan-cache(?:-v(\d+))?\.json", entry.name)
+        if m and entry.is_file():
+            ver = int(m.group(1)) if m.group(1) else 0
+            cache_candidates.append((ver, entry))
+    if cache_candidates:
+        cache_candidates.sort(key=lambda pair: pair[0], reverse=True)
+        try:
+            scan_cache = json.loads(cache_candidates[0][1].read_text(encoding="utf-8"))
+        except Exception:
+            scan_cache = None
+
+regional_endpoint = False
+settings_path = userdata_dir / "settings.json"
+if settings_path.is_file():
+    try:
+        settings_doc = json.loads(settings_path.read_text(encoding="utf-8"))
+        for inst in (settings_doc.get("providerInstances") or {}).values():
+            if not isinstance(inst, dict) or inst.get("driver") != "antigravity":
+                continue
+            cfg = inst.get("config") or {}
+            if isinstance(cfg, dict) and cfg.get("authMethod") == "agent-platform":
+                loc = str(cfg.get("gcpLocation") or "").strip().lower()
+                if loc and loc != "global":
+                    regional_endpoint = True
+    except Exception:
+        pass
+
+MODEL_IDS = {
+    246: "gemini-2.5-pro", 312: "gemini-2.5-flash", 313: "gemini-2.5-flash-thinking",
+    329: "gemini-2.5-flash-thinking", 330: "gemini-2.5-flash-lite", 281: "claude-sonnet-4",
+    282: "claude-sonnet-4", 290: "claude-opus-4", 291: "claude-opus-4", 333: "claude-sonnet-4-5",
+    334: "claude-sonnet-4-5", 340: "claude-haiku-4-5", 341: "claude-haiku-4-5",
+    342: "gpt-oss-120b-medium", 1026: "claude-opus-4-6", 1035: "claude-sonnet-4-6",
+    1016: "gemini-3.1-pro", 1036: "gemini-3.1-pro", 1037: "gemini-3.1-pro",
+    1018: "gemini-3-flash-preview", 1084: "gemini-3-flash-preview", 1047: "gemini-3-flash-preview",
+    1020: "gemini-3.5-flash-medium", 1021: "gemini-3.1-flash-image", 1050: "gemini-3.1-flash-lite",
+    1071: "gemini-3.6-flash-high", 1072: "gemini-3.6-flash-medium", 1073: "gemini-3.6-flash-low",
+    1132: "gemini-3.5-flash-high", 1133: "gemini-3.5-flash-high", 1187: "gemini-3.5-flash-extra-low",
+    1196: "gemini-3.6-flash", 1266: "gemini-3.6-flash", 1298: "gemini-3.7-flash-high",
+    1299: "gemini-3.7-flash-medium", 1300: "gemini-3.7-flash-low", 1301: "gemini-3.7-flash-tiered",
+    1318: "gemini-3.8-flash-high", 1319: "gemini-3.8-flash-medium", 1320: "gemini-3.8-flash-low",
+    1322: "gemini-3.8-flash-tiered", 1402: "claude-opus-5-5", 1417: "gemini-4-argon",
+    1418: "gemini-4-argon", 1419: "gemini-4-argon", 1427: "gemini-4-carbon", 1437: "gemini-4-carbon",
+    1467: "gemini-4-neon", 1525: "gemini-4-hydrogen", 1526: "gemini-4-hydrogen",
+    1527: "gemini-4-hydrogen", 1532: "gemini-4-neon", 1533: "gemini-4-neon",
+    1537: "gemini-pro-orchestrator-neon", 1667: "gemini-pro-orchestrator",
+    1669: "gemini-4-hydrogen-orchestrator",
+}
+
+def decode_fields(data):
+    out = {}
+    offset = 0
+    n = len(data)
+    while offset < n:
+        val = 0
+        shift = 0
+        while True:
+            if offset >= n or shift >= 70:
+                raise ValueError("invalid varint")
+            b = data[offset]
+            offset += 1
+            val |= (b & 127) << shift
+            if b < 128:
+                break
+            shift += 7
+        num = val >> 3
+        wire = val & 7
+        if num == 0:
+            raise ValueError("invalid field")
+        if wire == 0:
+            v = 0
+            s = 0
+            while True:
+                if offset >= n or s >= 70:
+                    raise ValueError("invalid varint")
+                b = data[offset]
+                offset += 1
+                v |= (b & 127) << s
+                if b < 128:
+                    break
+                s += 7
+            out.setdefault(num, []).append(v)
+        elif wire in (1, 2, 5):
+            if wire == 2:
+                length = 0
+                s = 0
+                while True:
+                    if offset >= n or s >= 70:
+                        raise ValueError("invalid varint")
+                    b = data[offset]
+                    offset += 1
+                    length |= (b & 127) << s
+                    if b < 128:
+                        break
+                    s += 7
+            else:
+                length = 8 if wire == 1 else 4
+            if length > n - offset:
+                raise ValueError("truncated field")
+            chunk = data[offset:offset + length]
+            offset += length
+            if wire == 2:
+                out.setdefault(num, []).append(chunk)
+        else:
+            raise ValueError("unsupported wire")
+    return out
+
+def num_at(f, k):
+    vs = f.get(k)
+    return vs[0] if vs and isinstance(vs[0], int) else 0
+
+def bytes_at(f, k):
+    vs = f.get(k)
+    return vs[0] if vs and isinstance(vs[0], (bytes, bytearray, memoryview)) else None
+
+def nested(f, k):
+    b = bytes_at(f, k)
+    return decode_fields(b) if b is not None else {}
+
+def text_at(f, k):
+    b = bytes_at(f, k)
+    if b is None:
+        return ""
+    try:
+        return bytes(b).decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+
+def ts_ms(f):
+    sec = num_at(f, 1)
+    return sec * 1000 + (num_at(f, 2) // 1_000_000) if sec > 0 else None
+
+def norm_model(name):
+    if not name:
+        return ""
+    s = re.sub(r"\s*\(([^)]*)\)\s*$", r"-\1", name.lower())
+    s = re.sub(r"\s+", "-", s)
+    if s.startswith("claude-"):
+        s = re.sub(r"^claude-(\d+(?:\.\d+)?)-(sonnet|opus|haiku)", r"claude-\2-\1", s).replace(".", "-")
+    return s
+
+def is_concrete(m):
+    return bool(re.match(r"^(?:gemini-\d|claude-(?:sonnet|opus|haiku)-\d|gpt-)", m)) and not bool(
+        re.match(r"^gemini-3-flash-(?:agent(?:-[ab])?|[ab])$", m)
+    )
+
+def parse_meta(raw, is_step):
+    root = decode_fields(raw)
+    if not is_step and bytes_at(root, 1) is None:
+        raise ValueError("missing gen metadata")
+    data = root if is_step else nested(root, 1)
+    model_msg = nested(data, 24) if is_step else data
+    primary_b = bytes_at(data, 9 if is_step else 4)
+    primary = decode_fields(primary_b) if primary_b is not None else None
+    usages = [primary] if primary is not None else []
+    for retry in data.get(28 if is_step else 17, []):
+        if isinstance(retry, (bytes, bytearray, memoryview)):
+            rb = bytes_at(decode_fields(retry), 2)
+            if rb is not None:
+                usages.append(decode_fields(rb))
+    names = [norm_model(text_at(model_msg, 12 if is_step else 19)), norm_model(text_at(model_msg, 8 if is_step else 21))]
+    model = next((n for n in names if is_concrete(n)), None) or next((n for n in names if n and not re.match(r"^model[_-]", n)), "")
+    model_id = num_at(model_msg, 1 if is_step else 3) or (num_at(primary, 1) if primary is not None else 0)
+    t = (ts_ms(nested(data, 8)) or ts_ms(nested(data, 1))) if is_step else ts_ms(nested(nested(data, 9), 4))
+    return {"model": model, "modelId": model_id, "timestampMs": t, "usages": usages}
+
+def scan_antigravity_dir(conv_dir):
+    real_dir = os.path.realpath(conv_dir)
+    if not os.path.isdir(real_dir):
+        return None
+    st = os.stat(real_dir)
+    volume_id = f"{st.st_dev}:{st.st_ino}"
+    learned = {}
+    candidates = []
+    for entry in sorted(os.listdir(real_dir)):
+        if not entry.endswith(".db"):
+            continue
+        db_path = os.path.join(real_dir, entry)
+        if os.path.islink(db_path) or not os.path.isfile(db_path):
+            continue
+        session_id = entry[:-3]
+        fallback_ts = int(os.stat(db_path).st_mtime * 1000)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.execute("PRAGMA busy_timeout = 100")
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "gen_metadata" not in tables and "steps" not in tables:
+                conn.close()
+                continue
+            gens = []
+            if "gen_metadata" in tables:
+                for idx, data in conn.execute("SELECT idx, data FROM gen_metadata ORDER BY idx"):
+                    if data is not None:
+                        gens.append((idx, parse_meta(data, False)))
+            traj_ts = None
+            if "trajectory_metadata_blob" in tables:
+                for (data,) in conn.execute("SELECT data FROM trajectory_metadata_blob"):
+                    if data is not None and traj_ts is None:
+                        traj_ts = ts_ms(nested(decode_fields(data), 2))
+            steps = []
+            if "steps" in tables:
+                for idx, data in conn.execute("SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx"):
+                    steps.append((idx, parse_meta(data, True)))
+            conn.close()
+        except Exception:
+            continue
+        for _, m in gens + steps:
+            if m["modelId"] > 0 and is_concrete(m["model"]):
+                prev = learned.get(m["modelId"])
+                if prev is None:
+                    learned[m["modelId"]] = m["model"]
+        gen_by_idx = {idx: m for idx, m in gens}
+        for src, items in (("step", steps), ("generation", gens)):
+            for pos, (idx, m) in enumerate(items):
+                for u_idx, u in enumerate(m["usages"]):
+                    mid = num_at(u, 1) or m["modelId"]
+                    g = gen_by_idx.get(idx) if src == "step" else None
+                    def matches(meta):
+                        return mid == 0 or meta["modelId"] == mid
+                    model = m["model"] if (matches(m) and m["model"]) else (g["model"] if (g and matches(g)) else "")
+                    out_tok = max(num_at(u, 3), num_at(u, 9) + num_at(u, 10))
+                    totals = {
+                        "uncachedInputTokens": num_at(u, 2),
+                        "cachedInputTokens": num_at(u, 5),
+                        "cacheCreationTokens": num_at(u, 4),
+                        "outputTokens": out_tok,
+                        "reasoningTokens": min(out_tok, num_at(u, 9)),
+                    }
+                    if totals["uncachedInputTokens"] + totals["cachedInputTokens"] + totals["cacheCreationTokens"] + out_tok == 0:
+                        continue
+                    keys = []
+                    for k in (11, 12, 7):
+                        tid = text_at(u, k)
+                        if tid:
+                            keys.append(f"antigravity:{k}:{tid}")
+                    rec = {
+                        "provider": "antigravity",
+                        "sessionId": session_id,
+                        "timestampMs": m["timestampMs"] if m["timestampMs"] is not None else (traj_ts if traj_ts is not None else fallback_ts),
+                        "model": model,
+                        "totals": totals,
+                        "reportedCostUsd": None,
+                        "speed": "standard",
+                        "dedupeKey": keys[0] if keys else f"antigravity:{session_id}:{src}:{pos}:{u_idx}",
+                    }
+                    if regional_endpoint:
+                        rec["regionalEndpoint"] = True
+                    candidates.append({
+                        "record": rec,
+                        "modelId": mid,
+                        "mq": 4 if is_concrete(model) else (1 if model else 0),
+                        "keys": keys,
+                        "tq": 2 if m["timestampMs"] is not None else (1 if traj_ts is not None else 0),
+                    })
+
+    groups = []
+    identities = {}
+    def find(i):
+        r = i
+        while groups[r]["p"] != r:
+            r = groups[r]["p"]
+        while i != r:
+            p = groups[i]["p"]
+            groups[i]["p"] = r
+            i = p
+        return r
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        t, s = groups[ra], groups[rb]
+        first = t if t["o"] < s["o"] else s
+        best_m = first if s["mq"] == t["mq"] else (s if s["mq"] > t["mq"] else t)
+        best_t = s if (s["tq"] > t["tq"] or (s["tq"] == t["tq"] and s["record"]["timestampMs"] < t["record"]["timestampMs"])) else t
+        xt, yt = t["record"]["totals"], s["record"]["totals"]
+        t["record"] = {
+            **first["record"],
+            "model": best_m["record"]["model"],
+            "timestampMs": best_t["record"]["timestampMs"],
+            "totals": {k: max(xt[k], yt[k]) for k in xt},
+        }
+        t["mq"] = best_m["mq"]
+        t["tq"] = best_t["tq"]
+        t["o"] = first["o"]
+        s["p"] = ra
+    for c in candidates:
+        lm = learned.get(c["modelId"])
+        fb = MODEL_IDS.get(c["modelId"])
+        model = (c["record"]["model"] if c["mq"] == 4 else "") or lm or fb or c["record"]["model"] or (f"antigravity-model-{c['modelId']}" if c["modelId"] > 0 else "antigravity-unknown")
+        c["record"]["model"] = model
+        c["mq"] = 4 if c["mq"] == 4 else (3 if lm else (2 if fb else c["mq"]))
+        idx = len(groups)
+        groups.append({**c, "p": idx, "o": idx})
+        for key in c["keys"]:
+            if key in identities:
+                union(idx, identities[key])
+            identities[key] = idx
+    records = [g["record"] for i, g in enumerate(groups) if g["p"] == i]
+    if not records:
+        return None
+    return {"dir": real_dir, "volumeId": volume_id, "records": records}
+
+antigravity_sources = []
+seen_dirs = set()
+profiles_dir = userdata_dir / "providers" / "antigravity"
+candidate_roots = []
+if profiles_dir.is_dir():
+    for entry in sorted(profiles_dir.iterdir()):
+        if entry.is_dir():
+            candidate_roots.append(entry / "antigravity-acp" / "conversations")
+for name in ("antigravity", "antigravity-cli", "antigravity-ide", "antigravity-backup"):
+    candidate_roots.append(home / ".gemini" / name / "conversations")
+candidate_roots.append(home / ".config" / "antigravity" / "conversations")
+
+for d in candidate_roots:
+    if not d.is_dir():
+        continue
+    real = os.path.realpath(d)
+    if real in seen_dirs:
+        continue
+    seen_dirs.add(real)
+    scanned = scan_antigravity_dir(real)
+    if scanned is not None:
+        antigravity_sources.append(scanned)
+
+payload = {
+    "hostId": host_id,
+    "scanCache": scan_cache,
+    "antigravity": antigravity_sources,
+}
+sys.stdout.buffer.write(gzip.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8")))
+`;

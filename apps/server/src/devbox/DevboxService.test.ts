@@ -2076,3 +2076,246 @@ describe("devbox usage token renewal", () => {
     }),
   );
 });
+
+describe("devbox usage access sync", () => {
+  it.live("propagates host usageAccess: allowed to running boxes without overriding denied", () =>
+    Effect.gen(function* () {
+      const boxName = "01-usage-access";
+      const CLAUDE_ID = ProviderInstanceId.make("claudeAgent");
+      const CODEX_ID = ProviderInstanceId.make("codex");
+      const ANTIGRAVITY_ID = ProviderInstanceId.make("antigravity");
+      const grantedScopes: Array<AuthEnvironmentScope> = [];
+      const settingsChanges = yield* Queue.unbounded<ServerSettings>();
+      const rpcMutations = yield* Queue.unbounded<ServerSettings>();
+
+      let hostSettings: ServerSettings = DEFAULT_SERVER_SETTINGS;
+      let boxSettings: ServerSettings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          ...DEFAULT_SERVER_SETTINGS.providerInstances,
+          [CODEX_ID]: {
+            driver: ProviderDriverKind.make("codex"),
+            displayName: "Codex",
+            enabled: true,
+            usageAccess: "denied",
+            config: {},
+            environment: [],
+          },
+          [ANTIGRAVITY_ID]: {
+            driver: ProviderDriverKind.make("antigravity"),
+            displayName: "Antigravity",
+            enabled: true,
+            config: { authMethod: "agent-platform" },
+            environment: [],
+          },
+        },
+      };
+
+      const allowedRpcGroup = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (
+            tag,
+          ): tag is Exclude<
+            keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
+            typeof WS_METHODS.serverGetSettings | typeof WS_METHODS.serverUpdateSettings
+          > => tag !== WS_METHODS.serverGetSettings && tag !== WS_METHODS.serverUpdateSettings,
+        ),
+      );
+      const rpcHandlers = allowedRpcGroup.toLayer({
+        [WS_METHODS.serverGetSettings]: () => Effect.sync(() => boxSettings),
+        [WS_METHODS.serverUpdateSettings]: (payload) =>
+          Effect.gen(function* () {
+            const mutation = payload.providerInstanceMutation;
+            if (mutation?.operation === "create" || mutation?.operation === "upsert") {
+              boxSettings = {
+                ...boxSettings,
+                providerInstances: {
+                  ...boxSettings.providerInstances,
+                  [mutation.instanceId]: mutation.instance,
+                },
+              };
+            }
+            yield* Queue.offer(rpcMutations, boxSettings);
+            return boxSettings;
+          }),
+      });
+      const wsRpcEffect = yield* RpcServer.toHttpEffectWebsocket(allowedRpcGroup).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            rpcHandlers,
+            RpcAuthorization.layer(grantedScopes),
+            RpcSerialization.layerJson,
+          ),
+        ),
+      );
+      const boxRoutes = Layer.mergeAll(
+        HttpRouter.add(
+          "POST",
+          "/api/auth/websocket-ticket/rpc",
+          Effect.succeed(HttpServerResponse.jsonUnsafe({ ticket: "box-ws-ticket" })),
+        ),
+        HttpRouter.add("GET", "/ws", wsRpcEffect),
+      );
+      const boxServerLayer = HttpRouter.serve(boxRoutes, {
+        disableListenLog: true,
+        disableLogger: true,
+      }).pipe(Layer.provideMerge(NodeHttpServer.layerTest));
+
+      const store = new Map<string, string>();
+      const filesystem = FileSystem.layerNoop({
+        exists: (file) => Effect.succeed(store.has(file)),
+        readFileString: (file) => Effect.sync(() => store.get(file) ?? ""),
+        writeFileString: (file, data) => Effect.sync(() => void store.set(file, data)),
+        rename: (from, to) =>
+          Effect.sync(() => {
+            store.set(to, store.get(from) ?? "");
+            store.delete(from);
+          }),
+        makeDirectory: () => Effect.void,
+      });
+
+      yield* Effect.gen(function* () {
+        const server = yield* HttpServer.HttpServer;
+        const livePort =
+          typeof server.address === "object" && "port" in server.address ? server.address.port : 0;
+        store.set(
+          "/state/userdata/devboxes.json",
+          JSON.stringify({ devboxes: [{ ...spare(boxName), localPort: livePort }] }),
+        );
+
+        yield* DevboxService.make.pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(ConfigProvider.fromEnv({ env: { T3CODE_DEVBOX_SPARES: "0" } })),
+              filesystem,
+              Path.layer,
+              ServerConfig.layerTest("/checkout", "/state").pipe(
+                Layer.provide([filesystem, Path.layer]),
+              ),
+              Layer.mock(ServerEnvironment.ServerEnvironment)({
+                getEnvironmentId: Effect.succeed(EnvironmentId.make("host-env-1")),
+              }),
+              Layer.mock(PeerLinks.PeerLinks)({}),
+              Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+              Layer.mock(SecretResolver.SecretResolver)({}),
+              Layer.mock(ServerSettingsService.ServerSettingsService)({
+                getSettings: Effect.sync(() => hostSettings),
+                subscribeChanges: Effect.succeed(Stream.fromQueue(settingsChanges)),
+              }),
+              Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedNone }),
+              Layer.mock(Digest.Digest)({ digest: () => Effect.succeed(new Uint8Array(32)) }),
+              Layer.mock(NetService.NetService)({ canListenOnHost: () => Effect.succeed(true) }),
+              FetchHttpClient.layer,
+              Layer.succeed(ServerActivation, Effect.never),
+              Layer.mock(DevboxVertexMetadata.DevboxVertexMetadata)({
+                socketPath: "",
+                brokerId: "broker-xyz",
+                hasAdcCredentials: Effect.succeed(false),
+                getAccount: Effect.succeed(null),
+              }),
+              Layer.mock(DevboxThreadMigration.DevboxThreadMigration)({
+                migrateFromDevbox: () =>
+                  Effect.succeed({
+                    migratedThreads: 0,
+                    skippedThreads: 0,
+                    migratedAttachments: 0,
+                  }),
+              }),
+              Layer.mock(DevboxLogins.DevboxLogins)({
+                info: () =>
+                  Effect.succeed({
+                    signedIn: false,
+                    account: null,
+                    expiresAt: null,
+                    sealed: false,
+                  }),
+                payload: Effect.succeed({ claude: null, codex: null }),
+                due: () => Effect.succeedNone,
+                generation: () => Effect.succeed(0),
+                pendingUrl: () => Effect.succeed(null),
+              }),
+              Layer.succeed(ProcessRunner.ProcessRunner, {
+                run: (input) =>
+                  Effect.gen(function* () {
+                    if (input.command === "coder" && input.args[0] === "list") {
+                      return {
+                        stdout: JSON.stringify([
+                          { name: boxName, latest_build: { status: "running" } },
+                        ]),
+                        stderr: "",
+                        code: ChildProcessSpawner.ExitCode(0),
+                        timedOut: false,
+                        stdoutTruncated: false,
+                        stderrTruncated: false,
+                        stdoutInvalidUtf8: false,
+                        stderrInvalidUtf8: false,
+                      };
+                    }
+                    if (input.command === "ssh" && input.args.at(-1) === "sh -s") {
+                      const script = typeof input.stdin === "string" ? input.stdin : "";
+                      grantedScopes.splice(
+                        0,
+                        grantedScopes.length,
+                        ...[...script.matchAll(/--scope\s+(\S+)/g)].map(
+                          (match) => match[1] as AuthEnvironmentScope,
+                        ),
+                      );
+                      return {
+                        stdout: "box-settings-token\n",
+                        stderr: "",
+                        code: ChildProcessSpawner.ExitCode(0),
+                        timedOut: false,
+                        stdoutTruncated: false,
+                        stderrTruncated: false,
+                        stdoutInvalidUtf8: false,
+                        stderrInvalidUtf8: false,
+                      };
+                    }
+                    return yield* Effect.never;
+                  }),
+              }),
+            ),
+          ),
+        );
+
+        hostSettings = {
+          ...DEFAULT_SERVER_SETTINGS,
+          providerInstances: {
+            ...DEFAULT_SERVER_SETTINGS.providerInstances,
+            [CLAUDE_ID]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              displayName: "Claude",
+              enabled: true,
+              usageAccess: "allowed",
+              config: {},
+              environment: [],
+            },
+            [CODEX_ID]: {
+              driver: ProviderDriverKind.make("codex"),
+              displayName: "Codex",
+              enabled: true,
+              usageAccess: "allowed",
+              config: {},
+              environment: [],
+            },
+            [ANTIGRAVITY_ID]: {
+              driver: ProviderDriverKind.make("antigravity"),
+              displayName: "Antigravity",
+              enabled: true,
+              usageAccess: "allowed",
+              config: { authMethod: "oauth" },
+              environment: [],
+            },
+          },
+        };
+        yield* Queue.offer(settingsChanges, hostSettings);
+
+        yield* Queue.take(rpcMutations);
+        const finalBoxSettings = yield* Queue.take(rpcMutations);
+        expect(finalBoxSettings.providerInstances[CLAUDE_ID]?.usageAccess).toBe("allowed");
+        expect(finalBoxSettings.providerInstances[ANTIGRAVITY_ID]?.usageAccess).toBe("allowed");
+        expect(finalBoxSettings.providerInstances[CODEX_ID]?.usageAccess).toBe("denied");
+      }).pipe(Effect.provide(boxServerLayer), Effect.scoped);
+    }),
+  );
+});

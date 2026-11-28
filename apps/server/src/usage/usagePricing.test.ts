@@ -437,4 +437,32 @@ describe("usage pricing", () => {
 
     expect(lookupRate(table, "example-model")).toBeNull();
   });
+
+  it("applies Vertex regional endpoint uplift when regionalEndpoint is true and skips overrides", () => {
+    const table = parseRateTable({
+      "gemini/gemini-4-neon": rate(2e-6, 2e-7),
+      "vertex_ai/gemini-4-neon": {
+        ...rate(2e-6, 2e-7),
+        regional_endpoint_uplift_multiplier: 1.1,
+      },
+    });
+    const overrides = createOverrideRateTable({
+      "gemini-4-neon": {
+        inputCostPerMillionTokens: 2,
+        outputCostPerMillionTokens: 10,
+        cacheReadCostPerMillionTokens: 0.2,
+      },
+    });
+
+    const base = priceUsage(table, record("gemini-4-neon")).costUsd;
+    const regional = priceUsage(table, { ...record("gemini-4-neon"), regionalEndpoint: true });
+    expect(regional.costSource).toBe("modelPriced");
+    expect(regional.costUsd).toBeCloseTo(base * 1.1);
+    expect(
+      cacheSavingsUsd(table, { ...record("gemini-4-neon"), regionalEndpoint: true }),
+    ).toBeCloseTo(cacheSavingsUsd(table, record("gemini-4-neon")) * 1.1);
+    expect(
+      priceUsage(table, { ...record("gemini-4-neon"), regionalEndpoint: true }, overrides).costUsd,
+    ).toBeCloseTo(priceUsage(table, record("gemini-4-neon"), overrides).costUsd);
+  });
 });
