@@ -26,6 +26,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -1882,5 +1883,196 @@ describe("devbox deletion with thread migration", () => {
         expect(commands).not.toContain("ssh:unseal-t3");
         expect(getUnlinkCalls()).toBe(0);
       }),
+  );
+});
+
+describe("devbox usage token renewal", () => {
+  it.live("hard-deletes the existing usage token with --delete before re-creating it on 401", () =>
+    Effect.gen(function* () {
+      const coderCalls: Array<ReadonlyArray<string>> = [];
+      const files = new Map<string, string>([
+        ["/state/userdata/devboxes.json", JSON.stringify({ devboxes: [spare("01-usage")] })],
+        ["/state/userdata/devbox-coder-token", "expired-token\n"],
+      ]);
+      const filesystem = FileSystem.layerNoop({
+        exists: (file) => Effect.succeed(files.has(file)),
+        readFileString: (file) => Effect.sync(() => files.get(file) ?? ""),
+        writeFileString: (file, text) => Effect.sync(() => void files.set(file, text)),
+        rename: (from, to) => Effect.sync(() => void files.set(to, files.get(from) ?? "")),
+        makeDirectory: () => Effect.void,
+      });
+      const service = yield* DevboxService.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: { T3CODE_DEVBOX_SPARES: "0" } })),
+            filesystem,
+            Path.layer,
+            ServerConfig.layerTest("/checkout", "/state").pipe(
+              Layer.provide([filesystem, Path.layer]),
+            ),
+            Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+            Layer.mock(PeerLinks.PeerLinks)({}),
+            Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+            Layer.mock(SecretResolver.SecretResolver)({}),
+            Layer.mock(ServerSettingsService.ServerSettingsService)({
+              getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+              subscribeChanges: Effect.succeed(Stream.empty),
+            }),
+            Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedNone }),
+            Layer.mock(Digest.Digest)({ digest: () => Effect.succeed(new Uint8Array(32)) }),
+            Layer.mock(NetService.NetService)({ canListenOnHost: () => Effect.succeed(true) }),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.succeed(
+                  HttpClientResponse.fromWeb(
+                    request,
+                    request.headers["coder-session-token"] === "fresh-token"
+                      ? new Response(
+                          JSON.stringify([
+                            {
+                              build_number: 1,
+                              transition: "start",
+                              created_at: "2026-11-27T12:00:00Z",
+                              job: { status: "succeeded", completed_at: "2026-11-27T12:01:00Z" },
+                            },
+                          ]),
+                          {
+                            status: 200,
+                            headers: { "content-type": "application/json" },
+                          },
+                        )
+                      : new Response("unauthorized", { status: 401 }),
+                  ),
+                ),
+              ),
+            ),
+            Layer.succeed(ServerActivation, Effect.never),
+            Layer.mock(DevboxVertexMetadata.DevboxVertexMetadata)({
+              socketPath: "",
+              brokerId: "test-broker",
+              hasAdcCredentials: Effect.succeed(false),
+              getAccount: Effect.succeed(null),
+            }),
+            Layer.mock(DevboxThreadMigration.DevboxThreadMigration)({
+              migrateFromDevbox: () =>
+                Effect.succeed({
+                  migratedThreads: 0,
+                  skippedThreads: 0,
+                  migratedAttachments: 0,
+                }),
+            }),
+            Layer.mock(DevboxLogins.DevboxLogins)({
+              info: () =>
+                Effect.succeed({
+                  signedIn: false,
+                  account: null,
+                  expiresAt: null,
+                  sealed: false,
+                }),
+              payload: Effect.succeed({ claude: null, codex: null }),
+              due: () => Effect.succeedNone,
+              generation: () => Effect.succeed(0),
+              pendingUrl: () => Effect.succeed(null),
+            }),
+            Layer.succeed(ProcessRunner.ProcessRunner, {
+              run: (input) =>
+                Effect.sync(() => {
+                  if (input.command === "coder") coderCalls.push(input.args);
+                  if (input.command === "coder" && input.args[0] === "list") {
+                    return {
+                      stdout: JSON.stringify([
+                        {
+                          id: "ws-1",
+                          name: "01-usage",
+                          created_at: "2026-11-27T00:00:00Z",
+                          latest_build: { status: "stopped" },
+                        },
+                      ]),
+                      stderr: "",
+                      code: ChildProcessSpawner.ExitCode(0),
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                      stdoutInvalidUtf8: false,
+                      stderrInvalidUtf8: false,
+                    };
+                  }
+                  if (input.command === "coder" && input.args[0] === "whoami") {
+                    return {
+                      stdout: JSON.stringify([{ url: "https://coder.example.test" }]),
+                      stderr: "",
+                      code: ChildProcessSpawner.ExitCode(0),
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                      stdoutInvalidUtf8: false,
+                      stderrInvalidUtf8: false,
+                    };
+                  }
+                  if (
+                    input.command === "coder" &&
+                    input.args[0] === "tokens" &&
+                    input.args[1] === "rm"
+                  ) {
+                    return {
+                      stdout: "Token has been deleted.\n",
+                      stderr: "",
+                      code: ChildProcessSpawner.ExitCode(0),
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                      stdoutInvalidUtf8: false,
+                      stderrInvalidUtf8: false,
+                    };
+                  }
+                  if (
+                    input.command === "coder" &&
+                    input.args[0] === "tokens" &&
+                    input.args[1] === "create"
+                  ) {
+                    return {
+                      stdout: "fresh-token\n",
+                      stderr: "",
+                      code: ChildProcessSpawner.ExitCode(0),
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                      stdoutInvalidUtf8: false,
+                      stderrInvalidUtf8: false,
+                    };
+                  }
+                  return {
+                    stdout: "",
+                    stderr: "",
+                    code: ChildProcessSpawner.ExitCode(0),
+                    timedOut: false,
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                    stdoutInvalidUtf8: false,
+                    stderrInvalidUtf8: false,
+                  };
+                }),
+            }),
+          ),
+        ),
+      );
+
+      const result = yield* service.usage({
+        since: "2026-11-27T00:00:00Z",
+        until: "2026-11-28T00:00:00Z",
+      });
+      expect(result.boxes.map((box) => box.name)).toEqual(["01-usage"]);
+      expect(coderCalls).toContainEqual(["tokens", "rm", "--delete", "t3-devbox-usage"]);
+      expect(coderCalls).toContainEqual([
+        "tokens",
+        "create",
+        "--name",
+        "t3-devbox-usage",
+        "--lifetime",
+        "720h",
+      ]);
+      expect(files.get("/state/userdata/devbox-coder-token")).toBe("fresh-token");
+    }),
   );
 });

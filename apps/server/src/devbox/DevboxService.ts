@@ -2637,7 +2637,10 @@ db.execute("ROLLBACK"); db.close(); sys.exit("write fence lock was no longer hel
     ),
   );
   const tokenLock = yield* Semaphore.make(1);
-  const mintToken = coder(["tokens", "rm", USAGE_TOKEN_NAME]).pipe(
+  // Coder v2.37+ keeps expired tokens in the DB unless `--delete` is passed, which blocks reusing
+  // the token name; fall back to plain `rm` for older CLIs that do not accept `--delete`.
+  const mintToken = coder(["tokens", "rm", "--delete", USAGE_TOKEN_NAME]).pipe(
+    Effect.catch(() => coder(["tokens", "rm", USAGE_TOKEN_NAME])),
     Effect.ignore,
     Effect.andThen(
       coder(["tokens", "create", "--name", USAGE_TOKEN_NAME, "--lifetime", "720h"], "1 minute"),
