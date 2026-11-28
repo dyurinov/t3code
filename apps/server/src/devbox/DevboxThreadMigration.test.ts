@@ -24,6 +24,7 @@ import {
   type OrchestrationV2DomainEvent,
   type RepositoryIdentity,
 } from "@t3tools/contracts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -56,6 +57,7 @@ const providerInstanceId = ProviderInstanceId.make("codex");
 const makeDbLayer = (sqlitePath: string, stateDir: string) => {
   const persistence = SqlitePersistence.layerFromPath(sqlitePath).pipe(
     Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(NodeCrypto.layer),
   );
   const configLayer = ServerConfig.layerTest("/laptop-checkout", stateDir).pipe(
     Layer.provide(NodeServices.layer),
